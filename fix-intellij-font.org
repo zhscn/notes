@@ -1,0 +1,28 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+由swing制作的页面字体渲染十分糟糕.配置不当的话idea字体锯齿问题十分严重.
+
+三种方法解决Intellij IDEA在linux下字体渲染问题
+
+* 安装jetbrains的jre
+
+#+begin_src bash
+yay -S intellij-idea-ultimate-edition-jre
+#+end_src
+
++在idea中设置 =switch boot jdk= ,选择 =/opt/intellij-idea-ultimate-edition/jre64=+
+如果安装了这个的话应该是默认其用的。
+
+* 安装jetbrains的jdk,(aur)
+
+#+begin_src bash
+yay -S intellij-jdk
+#+end_src
+
++在idea中设置 =switch boot jdk= ,选择 =/usr/lib/jvm/intellij-jdk=+
+需要使用 =Choose Runtime= 插件进行切换
+
+* 安装打过 infinality 补丁的openjdk (未测试)(aur)
+
+#+begin_src bash
+yay -S jdk8-openjdk-infinality
+#+end_src

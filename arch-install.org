@@ -1,0 +1,124 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+本文适用的环境为UEFI+gpt。
+
+* 准备
+
+略。
+
+* 分区
+
+#+begin_src bash
+mkfs.fat -F32 /dev/sda1
+mkfs.ext4 /dev/sda2
+mkswap /dev/sda3
+swapon /dev/sda3
+mount /dev/sda2 /mnt
+mkdir /mnt/boot
+mount /dev/sda1 /mnt/boot
+#+end_src
+
+使用 `btrfs` 文件系统：
+
+#+begin_src bash
+mkfs.fat -F32 /dev/sda1
+mkfs.btrfs -f /dev/sda2
+mount /dev/sda2 /mnt
+cd /mnt
+btrfs subvol create rootfs
+btrfs subvol create hometfs
+cd ..
+umount /dev/sda2
+mount /dev/sda2 /mnt -o subvol=rootfs,compress=lzo,noatime,discard,ssd,space_cache
+mkdir /mnt/home
+mount /dev/sda2 /mnt/home -o subvol=homefs,compress=lzo,noatime,discard,ssd,space_cache
+mkdir /mnt/boot
+mount /dev/sda1 /mnt/boot
+#+end_src
+
+* 安装
+
+联网：
+
+#+begin_src bash
+wifi-menu
+#+end_src
+
+添加国内源  `/etc/pacman.d/mirrorlist` 。
+
+#+begin_src bash
+Server = http://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch
+Server = http://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch
+#+end_src
+
+#+begin_src bash
+pacstrap /mnt base base-devel
+genfstab -U /mnt >> /mnt/etc/fstab
+#+end_src
+
+* 配置
+
+#+begin_src bash
+arch-chroot /mnt
+
+pacman -S iw dialog wpa_supplicant gvim grub efibootmgr intel-ucode zsh
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+hwclock --systohc
+#+end_src
+
+修改 `/etc/locale.gen` ，取消以下注释：
+
+#+begin_src bash
+en_US.UTF-8 UTF-8
+zh_CN.UTF-8 UTF-8
+#+end_src
+
+本地化：
+
+#+begin_src bash
+locale-gen
+echo "LANG=en_US.UTF-8" >> /etc/locale.conf
+#+end_src
+
+网络：
+
+#+begin_src bash
+echo arch >> /etc/hostname
+#+end_src
+
+修改 `/etc/hosts` ：
+
+#+begin_src bash
+127.0.0.1  localhost
+::1        localhost
+127.0.1.1  arch.localdomain arch
+#+end_src
+
+密码：
+
+#+begin_src bash
+passwd
+visudo * 取消%wheel ALL=(ALL) ALL的注释
+#+end_src
+
+用户：
+
+#+begin_src bash
+useradd -m -G wheel -s /bin/zsh zhscn
+passwd zhscn
+#+end_src
+
+引导：
+
+#+begin_src bash
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id="Arch Linux"
+grub-mkconfig -o /boot/grub/grub.cfg
+#+end_src
+
+ps:
+出现 =Device /dev/sda not initialized in udev database even after waiting 10000000 microseconds= 的错误需要卸载 =os-prober= 再进行 =grub-mkconfig -o /boot/grub/grub.cfg=
+
+出现 =warning failed to connect to lvmetad，falling back to device scanning=. 编辑 =/etc/lvm/lvm.conf= 将 =use_lvmetad = 1= 修改为 =use_lvmetad = 0=
+
+出现 =grub-probe: error: cannot find a GRUB drive for /dev/sdb1, check your device.map= 不用管它
+
+重启。

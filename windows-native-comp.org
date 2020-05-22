@@ -1,0 +1,813 @@
+#+TITLE: build native-comp emacs on windows
+#+AUTHOR: zhscn
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+
+在大佬的指点下成功在 Windows 上编译了 native-comp ，记录一下踩过得坑。
+主要参考： [[https://www.albertzhou.net/blog/2020/01/emacs-native-comp.html][在windows上用mingw64编译emacs的feature/native-comp分支]]
+
+* 编译 =libgccjit=
+首先获取最新的 gcc 代码：
+#+begin_src bash
+git clone --depth=1 https://mirrors.tuna.tsinghua.edu.cn/git/gcc.git
+tar cvf gcc.tar gcc # 保留一份原始代码方便后续的 pull
+#+end_src
+
+只需要编译 =jit= 的支持就好了，原始的 =configure= 选项有一些不太适用，可能是大佬编译的完整 gcc 。
+所以在编译 =gccjit= 之前要先编译一些依赖。方法就是在对应目录下直接 configure 和 make :
+- libcpp (需要手动添加 =libiconv= 的支持)
+- libbacktrace
+- libdecnumber (可能缺少某个头文件，在 gcc 根目录搜索一下复制到当前目录就行了)
+- libiberty
+
+** 代码修改
+#+begin_example
+Albert@Albert MINGW64 /e/workspace/gcc/gcc
+$ git diff
+diff --git a/gcc/jit/jit-playback.c b/gcc/jit/jit-playback.c
+index da687002a..0757c08bc 100644
+--- a/gcc/jit/jit-playback.c
++++ b/gcc/jit/jit-playback.c
+@@ -42,6 +42,9 @@ along with GCC; see the file COPYING3.  If not see
+
+ #include <pthread.h>
+
++/* mingw64 */
++#include <windows.h>
++
+ #include "jit-playback.h"
+ #include "jit-result.h"
+ #include "jit-builtins.h"
+@@ -613,6 +616,30 @@ new_rvalue_from_const <long> (type *type,
+     }
+ }
+
++/* Specialization of making an rvalue from a const, for host <long long int>.  */
++
++template <>
++rvalue *
++context::
++new_rvalue_from_const <long long int> (type *type,
++                             long long int value)
++{
++  // FIXME: type-checking, or coercion?
++  tree inner_type = type->as_tree ();
++  if (INTEGRAL_TYPE_P (inner_type))
++    {
++      tree inner = build_int_cst (inner_type, value);
++      return new rvalue (this, inner);
++    }
++  else
++    {
++      REAL_VALUE_TYPE real_value;
++      real_from_integer (&real_value, VOIDmode, value, SIGNED);
++      tree inner = build_real (inner_type, real_value);
++      return new rvalue (this, inner);
++    }
++}
++
+ /* Specialization of making an rvalue from a const, for host <double>.  */
+
+ template <>
+@@ -1818,7 +1845,7 @@ block (function *func,
+
+ /* Compile a playback::context:
+
+-   - Use the context's options to cconstruct command-line options, and
++   - Use the context's options to construct command-line options, and
+      call into the rest of GCC (toplev::main).
+    - Assuming it succeeds, we have a .s file.
+    - We then run the "postprocess" vfunc:
+@@ -2155,15 +2182,15 @@ playback::compile_to_file::copy_file (const char *src_path,
+
+   gcc_assert (total_sz_in == total_sz_out);
+   if (get_logger ())
+-    get_logger ()->log ("total bytes copied: %ld", total_sz_out);
++    get_logger ()->log ("total bytes copied: %lld", total_sz_out);
+
+   /* Set the permissions of the copy to those of the original file,
+      in particular the "executable" bits.  */
+-  if (fchmod (fileno (f_out), stat_buf.st_mode) == -1)
+-    add_error (NULL,
+-              "error setting mode of %s: %s",
+-              dst_path,
+-              xstrerror (errno));
++  /* if (fchmod (fileno (f_out), stat_buf.st_mode) == -1) */
++  /*   add_error (NULL, */
++  /*          "error setting mode of %s: %s", */
++  /*          dst_path, */
++  /*          xstrerror (errno)); */
+
+   fclose (f_out);
+ }
+@@ -2641,16 +2668,20 @@ dlopen_built_dso ()
+   JIT_LOG_SCOPE (get_logger ());
+   auto_timevar load_timevar (get_timer (), TV_LOAD);
+   void *handle = NULL;
+-  const char *error = NULL;
++  /* const char *error = NULL; */
++  DWORD error = 0;
+   result *result_obj = NULL;
+
+   /* Clear any existing error.  */
+-  dlerror ();
+-
+-  handle = dlopen (m_tempdir->get_path_so_file (),
+-                  RTLD_NOW | RTLD_LOCAL);
+-  if ((error = dlerror()) != NULL)  {
+-    add_error (NULL, "%s", error);
++  /* dlerror (); */
++  SetLastError(0);
++
++  /* handle = dlopen (m_tempdir->get_path_so_file (), */
++  /*              RTLD_NOW | RTLD_LOCAL); */
++  handle = LoadLibrary(m_tempdir->get_path_so_file ());
++  /* if ((error = dlerror()) != NULL)  { */
++  if ((error = GetLastError()) != 0)  {
++    add_error (NULL, "%ld", error);
+   }
+   if (handle)
+     {
+diff --git a/gcc/jit/jit-recording.c b/gcc/jit/jit-recording.c
+index b73cd76a0..acb40730e 100644
+--- a/gcc/jit/jit-recording.c
++++ b/gcc/jit/jit-recording.c
+@@ -4480,6 +4480,7 @@ recording::global::write_reproducer (reproducer &r)
+ /* Explicit specialization of the various mementos we're interested in.  */
+ template class recording::memento_of_new_rvalue_from_const <int>;
+ template class recording::memento_of_new_rvalue_from_const <long>;
++template class recording::memento_of_new_rvalue_from_const <long long int>;
+ template class recording::memento_of_new_rvalue_from_const <double>;
+ template class recording::memento_of_new_rvalue_from_const <void *>;
+
+@@ -4617,6 +4618,69 @@ recording::memento_of_new_rvalue_from_const <long>::write_reproducer (reproducer
+           m_value);
+           }
+
++/* The make_debug_string specialization for <long long int>, rendering it as
++     (TARGET_TYPE)LITERAL
++   e.g.
++     "(long long int)42".  */
++
++template <>
++string *
++memento_of_new_rvalue_from_const <long long int>::make_debug_string ()
++{
++  return string::from_printf (m_ctxt,
++                             "(%s)%lli",
++                             m_type->get_debug_string (),
++                             m_value);
++}
++
++/* The get_wide_int specialization for <long long int>.  */
++
++template <>
++bool
++memento_of_new_rvalue_from_const <long long int>::get_wide_int (wide_int *out) const
++{
++  *out = wi::shwi (m_value, sizeof (m_value) * 8);
++  return true;
++}
++
++/* The write_reproducer specialization for <long long int>.  */
++
++template <>
++void
++recording::memento_of_new_rvalue_from_const <long long int>::write_reproducer (reproducer &r)
++{
++  const char *id = r.make_identifier (this, "rvalue");
++
++  /* We have to special-case LONG_MIN, since e.g.
++       -9223372036854775808L
++     is parsed as
++       -(9223372036854775808L)
++     and hence we'd get:
++       error: integer constant is so large that it is unsigned [-Werror]
++       Workaround this by writing (LONG_MIN + 1) - 1.  */
++  if (m_value == LONG_LONG_MIN)
++    {
++      r.write ("  gcc_jit_rvalue *%s =\n"
++              "    gcc_jit_context_new_rvalue_from_long_long_int (%s, /* gcc_jit_context *ctxt */\n"
++              "                                          %s, /* gcc_jit_type *numeric_type */\n"
++              "                                          %lldL - 1); /* long long int value */\n",
++              id,
++              r.get_identifier (get_context ()),
++              r.get_identifier_as_type (m_type),
++              m_value + 1);
++      return;
++    }
++
++  r.write ("  gcc_jit_rvalue *%s =\n"
++          "    gcc_jit_context_new_rvalue_from_long_long_int (%s, /* gcc_jit_context *ctxt */\n"
++          "                                          %s, /* gcc_jit_type *numeric_type */\n"
++          "                                          %lldL); /* long long int value */\n",
++          id,
++          r.get_identifier (get_context ()),
++          r.get_identifier_as_type (m_type),
++          m_value);
++          }
++
+ /* The make_debug_string specialization for <double>, rendering it as
+      (TARGET_TYPE)LITERAL
+    e.g.
+diff --git a/gcc/jit/jit-result.c b/gcc/jit/jit-result.c
+index c10e5a13c..69c80f191 100644
+--- a/gcc/jit/jit-result.c
++++ b/gcc/jit/jit-result.c
+@@ -22,6 +22,9 @@ along with GCC; see the file COPYING3.  If not see
+ #include "system.h"
+ #include "coretypes.h"
+
++/* mingw64 */
++#include <windows.h>
++
+ #include "jit-common.h"
+ #include "jit-logging.h"
+ #include "jit-result.h"
+@@ -49,7 +52,8 @@ result::~result()
+ {
+   JIT_LOG_SCOPE (get_logger ());
+
+-  dlclose (m_dso_handle);
++  /* dlclose (m_dso_handle); */
++  FreeLibrary((HMODULE)m_dso_handle);
+
+   /* Responsibility for cleaning up the tempdir (including "fake.so" within
+      the filesystem) might have been handed to us by the playback::context,
+@@ -72,15 +76,18 @@ get_code (const char *funcname)
+   JIT_LOG_SCOPE (get_logger ());
+
+   void *code;
+-  const char *error;
++  /* const char *error; */
++  DWORD error;
+
+   /* Clear any existing error.  */
+-  dlerror ();
+-
+-  code = dlsym (m_dso_handle, funcname);
+-
+-  if ((error = dlerror()) != NULL)  {
+-    fprintf(stderr, "%s\n", error);
++  /* dlerror (); */
++  SetLastError(0);
++
++  /* code = dlsym (m_dso_handle, funcname); */
++  code = (void *)GetProcAddress((HMODULE)m_dso_handle, funcname);
++  /* if ((error = dlerror()) != NULL)  { */
++  if ((error = GetLastError()) != 0)  {
++    fprintf(stderr, "%ld\n", error);
+   }
+
+   return code;
+@@ -99,15 +106,19 @@ get_global (const char *name)
+   JIT_LOG_SCOPE (get_logger ());
+
+   void *global;
+-  const char *error;
++  /* const char *error; */
++  DWORD error;
+
+   /* Clear any existing error.  */
+-  dlerror ();
++  /* dlerror (); */
++  SetLastError(0);
+
+-  global = dlsym (m_dso_handle, name);
++  /* global = dlsym (m_dso_handle, name); */
++  global = (void *)GetProcAddress((HMODULE)m_dso_handle, name);
+
+-  if ((error = dlerror()) != NULL)  {
+-    fprintf(stderr, "%s\n", error);
++  /* if ((error = dlerror()) != NULL)  { */
++  if ((error = GetLastError()) != 0)  {
++    fprintf(stderr, "%ld\n", error);
+   }
+
+   return global;
+diff --git a/gcc/jit/jit-tempdir.c b/gcc/jit/jit-tempdir.c
+index 10c528faf..457591708 100644
+--- a/gcc/jit/jit-tempdir.c
++++ b/gcc/jit/jit-tempdir.c
+@@ -24,6 +24,316 @@ along with GCC; see the file COPYING3.  If not see
+
+ #include "jit-tempdir.h"
+
++/*-------------------------------------------------------------------------
++  *
++  * mkdtemp.c
++  *    create a mode-0700 temporary directory
++  *
++  * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
++  *
++  *
++  * IDENTIFICATION
++  *    src/port/mkdtemp.c
++  *
++  * This code was taken from NetBSD to provide an implementation for platforms
++  * that lack it.  (Among compatibly-licensed implementations, the OpenBSD
++  * version better resists denial-of-service attacks.  However, it has a
++  * cryptographic dependency.)  The NetBSD copyright terms follow.
++  *-------------------------------------------------------------------------
++  */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stddef.h>
++#include <stdarg.h>
++#include <sys/types.h>
++#include <errno.h>
++#include <locale.h>
++
++ /*
++  * Supplement to <sys/stat.h>.
++  *
++  * We must pull in sys/stat.h before this part, else our overrides lose.
++  */
++#define lstat(path, sb) stat(path, sb)
++
++#define _DIAGASSERT(x) do {} while (0)
++
++
++ /*  $NetBSD: gettemp.c,v 1.17 2014/01/21 19:09:48 seanb Exp $   */
++
++ /*
++  * Copyright (c) 1987, 1993
++  *  The Regents of the University of California.  All rights reserved.
++  *
++  * Redistribution and use in source and binary forms, with or without
++  * modification, are permitted provided that the following conditions
++  * are met:
++  * 1. Redistributions of source code must retain the above copyright
++  *    notice, this list of conditions and the following disclaimer.
++  * 2. Redistributions in binary form must reproduce the above copyright
++  *    notice, this list of conditions and the following disclaimer in the
++  *    documentation and/or other materials provided with the distribution.
++  * 3. Neither the name of the University nor the names of its contributors
++  *    may be used to endorse or promote products derived from this software
++  *    without specific prior written permission.
++  *
++  * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
++  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++  * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
++  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++  * SUCH DAMAGE.
++  */
++
++ #if HAVE_NBTOOL_CONFIG_H
++ #include "nbtool_config.h"
++ #endif
++
++ #if !HAVE_NBTOOL_CONFIG_H || !HAVE_MKSTEMP || !HAVE_MKDTEMP
++
++ #ifdef NOT_POSTGRESQL
++ #include <sys/cdefs.h>
++ #if defined(LIBC_SCCS) && !defined(lint)
++ #if 0
++ static char sccsid[] = "@(#)mktemp.c    8.1 (Berkeley) 6/4/93";
++ #else
++ __RCSID("$NetBSD: gettemp.c,v 1.17 2014/01/21 19:09:48 seanb Exp $");
++ #endif
++ #endif                          /* LIBC_SCCS and not lint */
++ #endif
++
++ #include <sys/types.h>
++ #include <sys/stat.h>
++
++ #include <assert.h>
++ // #include <ctype.h>
++ #include <errno.h>
++ #include <fcntl.h>
++ #include <stdio.h>
++ #include <stdlib.h>
++ #include <unistd.h>
++
++ #ifdef NOT_POSTGRESQL
++ #if HAVE_NBTOOL_CONFIG_H
++ #define GETTEMP     __nbcompat_gettemp
++ #else
++ #include "reentrant.h"
++ #include "local.h"
++ #define GETTEMP     __gettemp
++ #endif
++ #endif
++
++ static int
++ GETTEMP(char *path, int *doopen, int domkdir)
++ {
++     char       *start,
++                *trv;
++     struct stat sbuf;
++     int       pid;
++
++     /*
++      * To guarantee multiple calls generate unique names even if the file is
++      * not created. 676 different possibilities with 7 or more X's, 26 with 6
++      * or less.
++      */
++     // static char xtra[2] = "aa";
++     static char xtra[2] = "a";
++     int         xcnt = 0;
++
++     _DIAGASSERT(path != NULL);
++     /* doopen may be NULL */
++
++     pid = getpid();
++
++     /* Move to end of path and count trailing X's. */
++     for (trv = path; *trv; ++trv)
++         if (*trv == 'X')
++             xcnt++;
++         else
++             xcnt = 0;
++
++     /* Use at least one from xtra.  Use 2 if more than 6 X's. */
++     if (xcnt > 0)
++     {
++         *--trv = xtra[0];
++         xcnt--;
++     }
++     if (xcnt > 5)
++     {
++         *--trv = xtra[1];
++         xcnt--;
++     }
++
++     /* Set remaining X's to pid digits with 0's to the left. */
++     for (; xcnt > 0; xcnt--)
++     {
++         *--trv = (pid % 10) + '0';
++         pid /= 10;
++     }
++
++     /* update xtra for next call. */
++     if (xtra[0] != 'z')
++         xtra[0]++;
++     else
++     {
++         xtra[0] = 'a';
++         if (xtra[1] != 'z')
++             xtra[1]++;
++         else
++             xtra[1] = 'a';
++     }
++
++     /*
++      * check the target directory; if you have six X's and it doesn't exist
++      * this runs for a *very* long time.
++      */
++     for (start = trv + 1;; --trv)
++     {
++         if (trv <= path)
++             break;
++         if (*trv == '/')
++         {
++             int         e;
++
++             *trv = '\0';
++             e = stat(path, &sbuf);
++             *trv = '/';
++             if (e == -1)
++                 return doopen == NULL && !domkdir;
++             if (!S_ISDIR(sbuf.st_mode))
++             {
++                 errno = ENOTDIR;
++                 return doopen == NULL && !domkdir;
++             }
++             break;
++         }
++     }
++
++     for (;;)
++     {
++         if (doopen)
++         {
++             if ((*doopen =
++                  open(path, O_CREAT | O_EXCL | O_RDWR, 0600)) >= 0)
++                 return 1;
++             if (errno != EEXIST)
++                 return 0;
++         }
++         else if (domkdir)
++         {
++             if (mkdir(path, 0700) >= 0)
++             // if (mkdir(path) >= 0)
++                 return 1;
++             if (errno != EEXIST)
++                 return 0;
++         }
++         else if (lstat(path, &sbuf))
++             return errno == ENOENT ? 1 : 0;
++
++         /* tricky little algorithm for backward compatibility */
++         for (trv = start;;)
++         {
++             if (!*trv)
++                 return 0;
++             if (*trv == 'z')
++                 *trv++ = 'a';
++             else
++             {
++                 // 不能用isdigit，要用宏定义的
++                 if (ISDIGIT((unsigned char) *trv))
++                     *trv = 'a';
++                 else
++                     ++*trv;
++                 break;
++             }
++         }
++     }
++     /* NOTREACHED */
++ }
++
++ #endif                          /* !HAVE_NBTOOL_CONFIG_H || !HAVE_MKSTEMP ||
++                                  * !HAVE_MKDTEMP */
++
++
++ /*  $NetBSD: mkdtemp.c,v 1.11 2012/03/15 18:22:30 christos Exp $    */
++
++ /*
++  * Copyright (c) 1987, 1993
++  *  The Regents of the University of California.  All rights reserved.
++  *
++  * Redistribution and use in source and binary forms, with or without
++  * modification, are permitted provided that the following conditions
++  * are met:
++  * 1. Redistributions of source code must retain the above copyright
++  *    notice, this list of conditions and the following disclaimer.
++  * 2. Redistributions in binary form must reproduce the above copyright
++  *    notice, this list of conditions and the following disclaimer in the
++  *    documentation and/or other materials provided with the distribution.
++  * 3. Neither the name of the University nor the names of its contributors
++  *    may be used to endorse or promote products derived from this software
++  *    without specific prior written permission.
++  *
++  * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
++  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++  * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
++  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++  * SUCH DAMAGE.
++  */
++
++ #if HAVE_NBTOOL_CONFIG_H
++ #include "nbtool_config.h"
++ #endif
++
++ #if !HAVE_NBTOOL_CONFIG_H || !HAVE_MKDTEMP
++
++ #ifdef NOT_POSTGRESQL
++
++ #include <sys/cdefs.h>
++ #if defined(LIBC_SCCS) && !defined(lint)
++ #if 0
++ static char sccsid[] = "@(#)mktemp.c    8.1 (Berkeley) 6/4/93";
++ #else
++ __RCSID("$NetBSD: mkdtemp.c,v 1.11 2012/03/15 18:22:30 christos Exp $");
++ #endif
++ #endif                          /* LIBC_SCCS and not lint */
++
++ #if HAVE_NBTOOL_CONFIG_H
++ #define GETTEMP     __nbcompat_gettemp
++ #else
++ #include <assert.h>
++ #include <errno.h>
++ #include <stdio.h>
++ #include <stdlib.h>
++ #include <unistd.h>
++ #include "reentrant.h"
++ #include "local.h"
++ #define GETTEMP     __gettemp
++ #endif
++
++ #endif
++
++ char *
++ mkdtemp(char *path)
++ {
++     _DIAGASSERT(path != NULL);
++
++     return GETTEMP(path, NULL, 1) ? path : NULL;
++ }
++
++ #endif                          /* !HAVE_NBTOOL_CONFIG_H || !HAVE_MKDTEMP */
+
+ /* Construct a tempdir path template suitable for use by mkdtemp
+    e.g. "/tmp/libgccjit-XXXXXX", but respecting the rules in
+@@ -51,7 +361,7 @@ make_tempdir_path_template ()
+   tmpdir_len = strlen (tmpdir_buf);
+   /* tmpdir_buf should now have a dir separator as the final byte.  */
+   gcc_assert (tmpdir_len > 0);
+-  gcc_assert (tmpdir_buf[tmpdir_len - 1] == DIR_SEPARATOR);
++  /* gcc_assert (tmpdir_buf[tmpdir_len - 1] == DIR_SEPARATOR); */
+
+   file_template_buf = "libgccjit-XXXXXX";
+   file_template_len = strlen (file_template_buf);
+@@ -101,9 +411,9 @@ gcc::jit::tempdir::create ()
+     return false;
+   log ("m_path_tempdir: %s", m_path_tempdir);
+
+-  m_path_c_file = concat (m_path_tempdir, "/fake.c", NULL);
+-  m_path_s_file = concat (m_path_tempdir, "/fake.s", NULL);
+-  m_path_so_file = concat (m_path_tempdir, "/fake.so", NULL);
++  m_path_c_file = concat (m_path_tempdir, "\\fake.c", NULL);
++  m_path_s_file = concat (m_path_tempdir, "\\fake.s", NULL);
++  m_path_so_file = concat (m_path_tempdir, "\\fake.so", NULL);
+
+   /* Success.  */
+   return true;
+diff --git a/gcc/jit/jit-tempdir.h b/gcc/jit/jit-tempdir.h
+index 7bbf9ea2f..39542df5e 100644
+--- a/gcc/jit/jit-tempdir.h
++++ b/gcc/jit/jit-tempdir.h
+@@ -88,4 +88,5 @@ class tempdir : public log_user
+
+ } // namespace gcc
+
++char * mkdtemp(char *);
+ #endif /* JIT_TEMPDIR_H */
+diff --git a/gcc/jit/libgccjit++.h b/gcc/jit/libgccjit++.h
+index 82a62d614..2208f78c6 100644
+--- a/gcc/jit/libgccjit++.h
++++ b/gcc/jit/libgccjit++.h
+@@ -878,6 +878,16 @@ context::new_rvalue (type numeric_type,
+                                          value));
+ }
+
++inline rvalue
++context::new_rvalue (type numeric_type,
++                    long long int value) const
++{
++  return rvalue (
++    gcc_jit_context_new_rvalue_from_long_long_int (m_inner_ctxt,
++                                         numeric_type.get_inner_type (),
++                                         value));
++}
++
+ inline rvalue
+ context::zero (type numeric_type) const
+ {
+diff --git a/gcc/jit/libgccjit.c b/gcc/jit/libgccjit.c
+index 83055fc29..2f3076cf5 100644
+--- a/gcc/jit/libgccjit.c
++++ b/gcc/jit/libgccjit.c
+@@ -1197,6 +1197,19 @@ gcc_jit_context_new_rvalue_from_long (gcc_jit_context *ctxt,
+          ->new_rvalue_from_const <long> (numeric_type, value));
+ }
+
++gcc_jit_rvalue *
++gcc_jit_context_new_rvalue_from_long_long_int (gcc_jit_context *ctxt,
++                                     gcc_jit_type *numeric_type,
++                                     long long int value)
++{
++  RETURN_NULL_IF_FAIL (ctxt, NULL, NULL, "NULL context");
++  JIT_LOG_FUNC (ctxt->get_logger ());
++  RETURN_NULL_IF_FAIL_NONNULL_NUMERIC_TYPE (ctxt, numeric_type);
++
++  return ((gcc_jit_rvalue *)ctxt
++         ->new_rvalue_from_const <long long int> (numeric_type, value));
++}
++
+ /* Public entrypoint.  See description in libgccjit.h.
+
+    This is essentially equivalent to:
+diff --git a/gcc/jit/libgccjit.h b/gcc/jit/libgccjit.h
+index 21a0dc09b..21237c31a 100644
+--- a/gcc/jit/libgccjit.h
++++ b/gcc/jit/libgccjit.h
+@@ -812,6 +812,11 @@ gcc_jit_context_new_rvalue_from_long (gcc_jit_context *ctxt,
+                                      gcc_jit_type *numeric_type,
+                                      long value);
+
++extern gcc_jit_rvalue *
++gcc_jit_context_new_rvalue_from_long_long_int (gcc_jit_context *ctxt,
++                                     gcc_jit_type *numeric_type,
++                                     long long int value);
++
+ extern gcc_jit_rvalue *
+ gcc_jit_context_zero (gcc_jit_context *ctxt,
+                      gcc_jit_type *numeric_type);
+diff --git a/gcc/jit/libgccjit.map b/gcc/jit/libgccjit.map
+index 4514bd3aa..488a3a089 100644
+--- a/gcc/jit/libgccjit.map
++++ b/gcc/jit/libgccjit.map
+@@ -62,6 +62,7 @@ LIBGCCJIT_ABI_0
+     gcc_jit_context_new_rvalue_from_double;
+     gcc_jit_context_new_rvalue_from_int;
+     gcc_jit_context_new_rvalue_from_long;
++    gcc_jit_context_new_rvalue_from_long_long_int;
+     gcc_jit_context_new_rvalue_from_ptr;
+     gcc_jit_context_new_string_literal;
+     gcc_jit_context_new_struct_type;
+#+end_example
+上述依赖编译好之后进入 =gcc/gcc= 编译 =gccjit=
+
+#+begin_src bash
+./configure --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 --target=x86_64-w64-mingw32 --with-native-system-header-dir=/mingw64/x86_64-w64-mingw32/include --libexecdir=/mingw64/lib --with-arch=x86-64 --with-tune=generic --enable-languages=c,jit,lto,c++ --enable-shared --enable-static --enable-libatomic --enable-threads=posix --enable-graphite --enable-fully-dynamic-string --enable-libstdcxx-filesystem-ts=yes --enable-libstdcxx-time=yes --disable-libstdcxx-pch --disable-libstdcxx-debug --disable-isl-version-check --enable-lto --enable-libgomp --disable-multilib --enable-checking=release --disable-rpath --disable-win32-registry --disable-nls --disable-werror --disable-symvers --enable-plugin --with-libiconv --with-system-zlib --with-gmp=/mingw64 --with-mpfr=/mingw64 --with-mpc=/mingw64 --with-isl=/mingw64 --with-pkgversion='Rev2, Built by MSYS2 project. Albert 2020.01.20' --with-gnu-as --with-gnu-ld \
+--enable-host-shared \
+--enable-languages=jit \
+--disable-bootstrap
+#+end_src
+
+某些选项可能是不起作用的， =gmp= =mpfr= 和 =mpc= 实际并没有添加进 =Makefile= 。
+
+这里需要手动添加，编辑生成的 =Makefile= 指定 =GMPLIBS = -lmpc -lmpfr -lgmp= 。
+然后 make 就没有问题了。
+
+** 可能出现的问题
+
+mingw 下的目录结构可能有些问题，可能会有如下报错：
+#+begin_example
+make[3]: *** No rule to make target '../build-x86_64-w64-mingw32/libiberty/pic/libiberty.a', needed by 'build/genmddeps.exe'.  Stop.
+#+end_example
+解决办法就是手动创建缺少的目录然后将对应文件复制进去。
+
+无法编译 =xgcc.exe= ：
+出现这个问题可能是编译的依赖关系不对，需要手动 make 一下：
+#+begin_src bash
+make xgcc.exe
+#+end_src
+
+* make install
+编译完之后 =make install= ，有些东西默认设置不正确，需要手动编辑。
+
+** 环境变量
+这个涉及到后续的 emacs 的编译
+#+begin_src bash
+export LIBRARY_PATH=/mingw64/lib:/mingw64/lib/gcc/x86_64-w64-mingw32/9.3.0
+export PATH=$PATH:/mingw64/lib
+export emacs_dir=/path/to/emacs/source
+#+end_src
+** 名称修改
+生成的 =libgccjit.so= =libgccjit.so.0= =libgccjit.so.0.0.1=
+
+会安装到 =/mingw64/bin= 下。
+
+重命名 =libgccjit.so= 为 =libgccjit.dll= 。
+
+同时缺少静态库。编译出的静态库名称为 =libgccjit.so.0.0.1.a= ，重命名为 =libgccjit.a=
+
+* emacs 编译
+** 代码修改
+#+begin_example
+diff --git a/src/comp.c b/src/comp.c
+index 290fc3a9c4..43b5273d45 100644
+--- a/src/comp.c
++++ b/src/comp.c
+
+@@ -69,7 +71,7 @@ #define DECL_BLOCK(name, func)                                \
+ #ifdef HAVE__SETJMP
+ #define SETJMP _setjmp
+ #else
+-#define SETJMP setjmp
++#define SETJMP _setjmp
+ #endif
+ #define SETJMP_NAME SETJMP
+
+@@ -1268,10 +1270,12 @@ emit_limple_push_handler (gcc_jit_rvalue *handler, gcc_jit_rvalue *handler_type,
+          NULL,
+          comp.handler_jmp_field),
+        NULL);
+-
++  /* mingw64 _setjmp need 2 args */
++  args[1] = gcc_jit_context_null(comp.ctxt, comp.void_ptr_type);
+   gcc_jit_rvalue *res;
+   res =
+-    emit_call (intern_c_string (STR (SETJMP_NAME)), comp.int_type, 1, args, false);
++    emit_call (intern_c_string (STR (SETJMP_NAME)), comp.int_type, 2, args, false);
+   emit_cond_jump (res, handler_bb, guarded_bb);
+ }
+
+@@ -1838,7 +1842,9 @@ #define ADD_IMPORTED(f_name, ret_type, nargs, args)                              \
+   ADD_IMPORTED (push_handler, comp.handler_ptr_type, 2, args);
+
+   args[0] = gcc_jit_type_get_pointer (gcc_jit_struct_as_type (comp.jmp_buf_s));
+-  ADD_IMPORTED (SETJMP_NAME, comp.int_type, 1, args);
++  args[1] = comp.void_ptr_type;
++  ADD_IMPORTED (SETJMP_NAME, comp.int_type, 2, args);
+
+   ADD_IMPORTED (record_unwind_protect_excursion, comp.void_type, 0, NULL);
+
+@@ -3148,7 +3154,7 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
+       sigemptyset (&blocked);
+       sigaddset (&blocked, SIGALRM);
+       sigaddset (&blocked, SIGINT);
+-      sigaddset (&blocked, SIGIO);
++      /* sigaddset (&blocked, SIGIO); */
+       pthread_sigmask (SIG_BLOCK, &blocked, &oldset);
+     }
+   emit_ctxt_code ();
+#+end_example
+** 编译
+又一个需要注意的地方是 =--with-wide-int= 一定要添加，否则会报错。

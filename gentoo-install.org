@@ -1,0 +1,448 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+gentoo总体不错，编译一次后就可以稳定的运行，但是在 = gui = 环境中总有若干小毛病， 且 = qt = ， = gtk = 之间的依赖关系复杂，小bug不断，故重回arch。留此存档备份。
+
+* 分区
+
+#+begin_src bash
+mkfs.ext2 /dev/sda1
+mkfs.fat -F32 /dev/sda2
+mkfs.ext4 /dev/sda3
+mount /dev/sda3 /mnt/gentoo
+mkdir /mnt/gentoo/boot
+mount /dev/sda2 /mnt/gentoo/boot
+#+end_src
+
+* 下载stage3
+
+#+begin_src bash
+cd /mnt/gentoo
+links http://mirrors.163.com/gentoo/releases/amd64/autobuilds/current-stage3-amd64/
+tar xpvf stage3-*.tar.bz2 --xattrs-include='*.*' --numeric-owner
+#+end_src
+
+*** 编译选项
+
+通过使用 =MAKEOPTS= 可以定义在安装软件的时候同时可以产生并行编译的数目.选择 =CPU核心数= 或 =核心数+1=
+
+#+begin_src bash
+echo "MAKEOPTS="-j4" >> /mnt/gentoo/etc/portage/make.conf
+#+end_src
+
+*** 选择镜像
+
+#+begin_src bash
+mirrorselect -i -o >> /mnt/gentoo/etc/portage/make.conf
+#+end_src
+
+选择中国镜像即可， =space= 选择， =enter= 确认
+
+*** 建立Gentoo ebuild 软件仓库
+
+#+begin_src bash
+mkdir --parents /mnt/gentoo/etc/portage/repos.conf
+cp /mnt/gentoo/usr/share/portage/config/repos.conf /mnt/gentoo/etc/portage/repos.conf/gentoo.conf
+#+end_src
+
+*** 复制DNS信息
+
+#+begin_src bash
+cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+#+end_src
+
+如果使用wifi连接保存的是路由信息，一般如下
+
+#+begin_src bash
+nameserver 192.168.0.1
+#+end_src
+
+可手动更改为阿里DNS =223.5.5.5= 等
+
+*** 挂载文件系统
+
+#+begin_src bash
+mount --types proc /proc /mnt/gentoo/proc
+mount --rbind /sys /mnt/gentoo/sys
+mount --make-rslave /mnt/gentoo/sys
+mount --rbind /dev /mnt/gentoo/dev
+mount --make-rslave /mnt/gentoo/dev
+#+end_src
+
+*** 进入新环境
+
+在之后的操作出现错误后退出 =live= 环境，可重新执行次步骤.系统故障也可以由此进行维护.
+
+#+begin_src bash
+chroot /mnt/gentoo /bin/bash
+source /etc/profile
+export PS1="(chroot) ${PS1}"
+#+end_src
+
+* 安装gentoo
+** 开启不稳定软件分支(可选)
+
+#+begin_src bash
+echo ACCEPT_KEYWORDS="~amd64" >> /etc/portage/make.conf
+#+end_src
+
+** 从网站安装ebuild 数据库快照
+
+#+begin_src bash
+emerge-webrsync
+#+end_src
+
+** 选择正确的配置文件
+
+#+begin_src bash
+eselect profile list
+#  Available profile symlink targets:
+#  [1]   default/linux/amd64/17.0 *
+#  [2]   default/linux/amd64/17.0/desktop
+#  [3]   default/linux/amd64/17.0/desktop/gnome
+#  [4]   default/linux/amd64/17.0/desktop/kde
+eselect profile set 1
+#+end_src
+
+** 更新@world集合
+
+#+begin_src bash
+emerge --ask --verbose --update --deep --newuse @world
+#+end_src
+
+** 设置时区
+
+#+begin_src bash
+echo "Asia/Shanghai" > /etc/timezone
+emerge --config sys-libs/timezone-data
+#+end_src
+
+** 配置地区
+
+#+begin_src bash
+nano -w /etc/locale.gen
+#+end_src
+
+取消如下注释
+
+#+begin_src bash
+#en_US.UTF-8 UTF-8
+#zh_CN.UTF-8 UTF-8
+locale-gen
+eselect locale set en_US.utf8
+#+end_src
+
+重新加载环境
+
+#+begin_src bash
+env-update && source /etc/profile && export PS1="(chroot) $PS1"
+#+end_src
+
+** 安装内核源码
+
+#+begin_src bash
+emerge --ask sys-kernel/gentoo-sources
+#+end_src
+
+** 配置内核
+
+自动配置
+
+#+begin_src bash
+emerge --ask --quiet sys-kernel/genkernel
+#+end_src
+
+如果提示 =config file '/etc/portage/package.use/zz-autounmask' needs update= 则依次输入 =etc-update= ， =-3= ， =yes= 更新依赖关系
+
+- 配置 =/etc/fstab=
+
+#+begin_src bash
+nano /etc/fstab
+#/dev/sda2   /boot        ext2    defaults，noatime     0 2
+#/dev/sda3   none         swap    sw                   0 0
+#/dev/sda4   /            ext4    noatime              0 1
+#+end_src
+
+开始编译
+
+#+begin_src bash
+time genkernel all
+#+end_src
+
+编译需要20分钟左右，由电脑配置决定
+
+** 安装固件
+
+#+begin_src bash
+emerge --ask --quiet sys-kernel/linux-firmware
+#+end_src
+
+** 修改主机名
+
+#+begin_src bash
+nano -w /etc/conf.d/hostname
+# hostname =“Gentoo”
+#+end_src
+
+** 配置网络
+
+#+begin_src bash
+emerge --ask --noreplace net-misc/netifrc
+#+end_src
+
+** 设置hosts
+
+#+begin_src bash
+nano /etc/hosts
+-------------------------gentoo 为主机名
+127.0.0.1   localhost.localdomain localhost Gentoo
+::1         localhost.localhost   localhost Gentoo
+#+end_src
+
+** 设置密码
+
+#+begin_src bash
+passwd
+#+end_src
+
+** 安装工具
+
+- 系统日志记录工具
+
+#+begin_src bash
+emerge --ask app-admin/sysklogd
+rc-update add sysklogd default
+#+end_src
+
+- cron守护进程
+
+#+begin_src bash
+emerge --ask sys-process/cronie
+rc-update add cronie default
+#+end_src
+
+- 文件索引
+
+#+begin_src bash
+emerge --ask sys-apps/mlocate
+#+end_src
+
+- 远程访问
+
+#+begin_src bash
+rc-update add sshd default
+#+end_src
+
+如果需要终端访问（在远程服务器的情况下这是可能的），请在 /etc/inittab中取消注释控制台部分：
+
+#+begin_src bash
+nano -w /etc/inittab
+# SERIAL CONSOLES
+s0:12345:respawn:/sbin/agetty 9600 ttyS0 vt100
+s1:12345:respawn:/sbin/agetty 9600 ttyS1 vt100
+#+end_src
+
+** 网络工具
+
+#+begin_src bash
+emerge --ask --quiet dhcpcd iw wpa_supplicant
+#+end_src
+
+** 安装引导器
+
+UEFI需要执行:
+
+#+begin_src bash
+echo 'GRUB_PLATFORMS="efi-64"' >> /etc/portage/make.conf
+#+end_src
+
+安装grub
+
+#+begin_src bash
+emerge --ask sys-boot/grub:2
+grub-install --target=x86_64-efi --efi-directory=/boot/EFI
+#+end_src
+
+如果提示 =Could not prepare Boot variable: Read-only file system= 运行:
+
+#+begin_src bash
+mount -o remount，rw /sys/firmware/efi/efivars
+#+end_src
+
+配置
+
+#+begin_src bash
+grub-mkconfig -o /boot/grub/grub.cfg
+#+end_src
+
+** 添加用户
+
+#+begin_src bash
+useradd -m -G users，wheel，audio -s /bin/bash yourname
+#+end_src
+
+gentoo默认没有安装 =sudo= 包，需要手动安装
+
+#+begin_src bash
+emerge --ask --quiet sudo
+nano /etc/sudoers
+---取消第82行的注释，即wheel用户组可以使用sudo
+%wheel ALL=(ALL) ALL
+#+end_src
+
+** 删除tar包
+
+#+begin_src bash
+cd /
+rm /stage3-*.tar.bz2*
+#+end_src
+
+** 安装完成，重启
+
+#+begin_src bash
+exit
+reboot
+#+end_src
+
+* 环境配置
+
+以下所有操作均在 =root=  用户下进行
+
+** 配置内核的方法
+
+#+begin_src bash
+cd /usr/src/linux
+make menuconfig
+#+end_src
+
+配置完成后编译，安装
+
+#+begin_src bash
+make && make modules_install && make install
+grub-mkconfig -o /boot/grub/grub.cfg
+#+end_src
+
+** 安装GUI
+
+*** 安装/设置桌面相关服务
+
+#+begin_src bash
+emerge --ask --quiet sys-apps/dbus polkit udisks eudev consolekit
+#+end_src
+
+- 修改 =USE=
+
+#+begin_src bash
+vim /etc/portage/make.conf
+# 添加USE
+USE="dbus policykit udisks  eudev consolekit"
+#+end_src
+
+- 开启内核对 =udisks= 的支持
+
+#+begin_example
+KERNEL udisks2
+General setup  --->
+    [*] Support for paging of anonymous memory (swap)
+Device Drivers  --->
+    < > ATA/ATAPI/MFM/RLL support (DEPRECATED)  --->
+File Systems -->
+    Native Language Support -->
+        <*> NLS UTF8
+    Pseudo filesystems  --->
+        -*- Tmpfs virtual memory file system support (former shm fs)
+        [*]   Tmpfs POSIX Access Control Lists
+#+end_example
+
+**** 相关服务自启
+
+#+begin_src bash
+rc-update add dbus default
+rc-update add udev default
+rc-update add consolekit default
+# 查看所有服务
+rc-update show -v
+#+end_src
+
+*** 安装 =xorg-server=
+
+**** 添加 =USE=
+
+#+begin_src bash
+vim /etc/portage/make.conf
+USE="X"
+INPUT_DEVICES="libinput synaptics"
+VIDEO_CARDS="nvidia intel"
+#+end_src
+
+**** 配置内核
+
+- 输入驱动支持
+
+#+begin_example
+＃Enabling evdev in the kernel
+Device Drivers --->
+  Input device support --->
+  <*>  Event interface
+#+end_example
+
+- 内核模式设置
+
+#+begin_example
+Device Drivers --->
+   Graphics support --->
+      Frame Buffer Devices --->
+         <*> Support for frame buffer devices --->
+         * 禁用所有驱动， 除了 =EFI= 相关
+
+    ** (Further down， enable basic console support. KMS uses this.)
+    Console display driver support --->
+      <*>  Framebuffer Console Support
+#+end_example
+
+- nvidia
+
+#+begin_example
+[*] Enable loadable module support ---> ＃开启可加载模块支持
+Processor type and features --->　＃开启 MTRR 支持
+    [*] MTRR (Memory Type Range Register) support
+Device Drivers --->
+   Graphics support --->　
+　　　 -*- /dev/agpgart (AGP Support) --->　＃启用agpgart支持
+      < > Nouveau (nVidia) cards　＃确保禁用nouveau驱动程序：
+      Frame buffer Devices ---> ＃禁用对内核驱动程序的支持
+            <*> Support for frame buffer devices --->
+            < >   nVidia Framebuffer Support
+            < >   nVidia Riva support
+#+end_example
+
+**** 安装 =xorg-server=
+
+#+begin_src bash
+emerge --ask --quiet xorg-server
+#+end_src
+
+完成后
+
+#+begin_src bash
+env-update
+source /etc/profile
+#+end_src
+
+**** 配置 =xorg.conf=
+
+使用xorg自动生成 =xorg.conf.new=
+
+#+begin_src bash
+Xorg -configure
+#+end_src
+
+测试配置文件
+
+#+begin_src bash
+Xorg -config xorg.config.new -retro
+#+end_src
+
+测试成功能看到黑白相见的屏幕和鼠标，使用 =Ctrl+Alt+F1= 退出.
+
+#+begin_src bash
+cp xorg.conf.new /etc/X11/xorg.conf
+#+end_src

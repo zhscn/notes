@@ -1,0 +1,82 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+事实证明，发明这个键位映射的人是个天才：
+
+- =CapsLk= 和 =Ctrl= 互换。
+- 按住 =Ctrl= 不放加其他键位时，使用 =Ctrl= 。只敲击一下 =Ctrl= 使用 =Esc= 。
+
+* Linux
+
+Linux 传统的键位修改可以用 =Xmodmap= 。但是吧，=fcitx= 好像会修改 =usermodmap= 的环境变量。导致用户设置的 =usermodmap= 失效，只能把 =.Xmodmap= 放在 =Home= 下，强迫症表示受不了。
+
+更加底层的一种做法是使用 =setxkbmap= 。这个命令可以直接互换 =CapsLk= 和 =Ctrl= ：
+
+#+begin_src bash
+setxkbmap -option ctrl:swapcaps
+#+end_src
+
+这样实现了第一个功能。
+
+想要 =Ctrl= 使用 =Esc= 需要安装 =xcape= ：
+
+#+begin_src bash
+xcape -e 'Control_L=Escape'
+#+end_src
+
+把这两条命令放入 =.xinitrc= ，这样 =startx= 后可以自动映射键位。
+
+至于使用display manager的。。不用就好了
+
+* Windows
+
+win下的映射属实麻烦。
+
+** 只实现 =CapsLk= 和 =Ctrl= 互换
+
+这个直接修改注册表：
+#+begin_example
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout]
+"Scancode Map"=hex:00,00,00,00,00,00,00,00,03,00,00,00,1d,00,3a,00,3a,00,1d,00,00,00,00,00
+
+原始注册表如下：
+
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout]
+"Scancode Map"=hex:00,00,00,00,00,00,00,00,03,00,00,00,00,00,00,00,00,00,00,00,\
+  00,00,00,00
+#+end_example
+
+注册表无法统一 =Ctrl= 和 =Esc= 。~~辣鸡M$~~
+
+** AutoHotKey
+
+神器无需多说
+
+忘了从哪抄的了。
+#+begin_example
+; Author: fwompner gmail com
+*InstallKeybdHook
+SetCapsLockState, alwaysoff
+Capslock::
+Send {LControl Down}
+KeyWait, CapsLock
+Send {LControl Up}
+if ( A_PriorKey = "CapsLock" )
+{
+    Send {Esc}
+}
+return
+$LControl::CapsLock
+#+end_example
+
+然后需要编译为可执行文件，添加 =计划任务= 以管理员启动。
+
+不这么做的话在具有管理员权限的窗口会失效，比如设置环境变量的界面。
+
+* Mac
+
+=Karabiner-Elements = 、 =Hammerspoon= 和 =Keyboard Maestro =
+
++有钱了再试试+

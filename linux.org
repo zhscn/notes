@@ -1,0 +1,701 @@
+#+TITLE: Linux 编程基础
+#+AUTHOR: 张松
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
+
+test
+
+这篇短文这是对几个基础 =Linux api= 的使用[fn:1]。更加深入的内容可以学习[[https://book.douban.com/subject/25900403][UNIX环境高级编程（第3版）]]
+（缩写 =APUE= ），[[https://book.douban.com/subject/26434583][UNIX网络编程 卷1：套接字联网API（第3版）]]（缩写 =UNP= ）。
+
+在阅读这两本书时，有一点需要注意：由于这两本成书已久，有些内容已经发生变化[fn:2]。
+更多新增内容可以通过 =manpage= 以及 [[https://pubs.opengroup.org/onlinepubs/9699919799/functions/contents.html][System Interfaces]] 查阅。
+
+本文所有函数的接口都按照如下形式说明。
+#+BEGIN_SRC C
+#include <sys/socket.h> // 该函数声明在 sys/socket.h 中
+int socket(int family, int type, int protocol); // 函数声明
+#+END_SRC
+
+* TCP
+** 三路握手
+#+CAPTION: TCP的三路握手
+[[https://notes.shichao.io/unp/figure_2.2.png]]
+- 服务器准备好接受外来的连接。通常调用 =socket= ， =bind= 和 =listen= 三个函数完成。称为被动打开。
+- 客户通过调用 =connect= 发起连接，称为主动打开。客户 TCP 发送一个 SYN 分节, 它告诉服务器客户端将在连接中发送数据的初始序列号。通常 SYN 分节不携带数据。
+- 服务器确认(ACK)客户的 SYN，同时自己也发送一个 SYN 分节。
+- 客户确认服务器的 SYN。
+** TCP 选项
+每一个 SYN 可以包含多个 TCP 选项
+- MSS：发送端告诉对方自己的最大分节大小, 即它在本连接中的每个 TCP 分节中愿意接受的最大数据量. 使用 =TCP_MAXSEG= 设置这个选项。
+- 窗口规模。TCP 连接的任何一段能够告知对方的最大窗口大小是 65535，其在 TCP 首部相应字段占16位。新选项指定 TCP 首部的通告窗口必须左移的位数(0~14)，最大窗口接近 1GB( $65535 * 2^{14}$ )。 =SO_RCVBUF= 设置这个选项。
+** TCP 连接终止
+#+CAPTION: TCP 连接关闭时的分组情况
+[[https://notes.shichao.io/unp/figure_2.3.png]]
+- 某个应用进程首先调用 close，则该端执行 主动关闭。该端发送一个 FIN 分节。
+- 接受到 FIN 分节的对端执行被动关闭。这个 FIN 由 TCP 确认 (ACK)。 它的接收作为一个 EOF 传递给应用端。
+- 一段时间后，接收到 EOF 的应用进程调用 close 关闭套接字。导致它的 TCP 也发送一个 FIN。
+- 原发送端 TCP 确认 (ACK)这个 FIN。
+** TCP 状态转换图
+#+CAPTION: TCP 状态转换图
+[[https://images0.cnblogs.com/blog/12132/201302/21202019-b0785c098cba475180185cc684ce6122.png]]
+#+CAPTION: TCP 连接的分组交换
+[[https://notes.shichao.io/unp/figure_2.5.png]]
+* Socket 地址
+** 字节序函数
+内存储存字节的方法有两种：
+- 低序字节在起始地址。称为小端字节序。
+- 高序字节在起始地址。称为大端字节序。
+
+#+BEGIN_SRC C
+#include <stdio.h>
+int main() {
+  union {
+    short value;
+    char union_bytes[sizeof(short)];
+  } test;
+
+  test.value = 0x0102;
+  if ((test.union_bytes[0] == 1) && (test.union_bytes[1] == 2)) {
+    printf("big endian\n");
+  } else if ((test.union_bytes[0] == 2) && (test.union_bytes[1] == 1)) {
+    printf("small endian\n");
+  } else {
+    printf("unknown\n");
+  }
+}
+#+END_SRC
+
+现在大多数系统都采用小端序。
+
+网络字节序采用大端序。套接字地址结构的某些字段须按照网络字节序进行维护。字节序之间的转换有如下四个函数：
+#+BEGIN_SRC C
+#include <netinet/in.h>
+uint16_t htons(uint16_t host16bitvalue);
+uint32_t htonl(uint32_t host32bitvalue);
+uint16_t ntohs(uint16_t net16bitvalue);
+uint32_t stonl(uint32_t net32bitvalue);
+#+END_SRC
+
+=h= 代表 =host= ， =n= 代表 =net= ， =l= 代表 =long= ， =s= 代表 =short= 。
+
+在采用大端序的系统中，这四个函数通常为空宏。
+
+** Socket 地址结构
+
+#+BEGIN_SRC C
+#include<netinet/in.h>
+struct in_addr {
+  in_addr_t s_addr;         // 历史上曾有多个联合字段(union)以访问 ABC 类字段，后废弃
+};
+
+struct sockaddr_in {
+  uint8_t        sin_len;      // 为增加对 OSI 协议的支持添加, POSIX 没有规定这个成员
+  sa_family_t    sin_family;   // 地址协议簇
+  in_port_t      sin_port;     // 端口
+  struct in_addr sin_addr;     // IP 地址
+  char           sin_zero[8];  // 未曾使用
+}
+#+END_SRC
+
+** 通用套接字地址结构
+
+#+BEGIN_SRC C
+#include<netinet/in.h>
+struct sockaddr {
+  uint8_t     sa_len;
+  sa_family_t sa_family;   // 协议族
+  char        sa_data[14]; // 特定协议地址
+};
+// bind 声明
+int bind(int, struct sockaddr*, socklen_t);
+// 强制类型转换:
+bind(sockfd, (struct sockaddr*)&serv, sizeof(serv));
+#+END_SRC
+
+*** 新通用套接字地址结构
+#+BEGIN_SRC C
+#include<netinet/in.h>
+struct sockaddr_stroage {
+  uint8_t     ss_len;
+  sa_family_t ss_family;
+};
+#+END_SRC
+
+** =inet_aton=, =inet_addr= and =inet_ntoa=
+
+这三个函数是关于点分十进制数串（例如：192.168.0.1）与 32 位网络字节序二进制值之间的转化。
+#+BEGIN_SRC C
+#include <arpa/inet.h>
+in_addr_t inet_addr(const char *strptr);
+int inet_aton(const char *strptr, struct in_addr *addrptr);
+char *inet_ntoa(struct in_addr inaddr);
+#+END_SRC
+
+两个新函数 =inet_pton= 和 =inet_ntop= 同时支持 IPv4 和 IPv6。
+
+#+BEGIN_SRC C
+#include <arpa/inet.h>
+int inet_pton(int family, const char *strptr, void *addrptr);
+const char *inet_ntop(int family, const void *addrptr, char *strptr, size_t len);
+#+END_SRC
+
+example:
+#+BEGIN_SRC C
+inet_pton(AF_INET, cp, &foo.sin_addr);
+char str[INET_ADDRSTRLEN];
+ptr = inet_ntop(AF_INET, &foo.sin_addr, str, sizeof(str));
+#+END_SRC
+
+* 基本 TCP 套接字编程
+** =socket=
+
+#+BEGIN_SRC C
+#include <sys/types.h>
+#include <sys/socket.h>
+int socket(int family, int type, int protocol);
+#+END_SRC
+family 指明协议族，type 为套接字类型[fn:3]，protocol 某个协议类型常值。
+
+example:
+#+BEGIN_SRC C
+int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+#+END_SRC
+
+=socket= 调用成功后返回的是一个 socket 文件描述符。类似于 =open= 的返回值，都是一个整形变量。
+
+| family     | 说明         |
+| =AF_INET=  | IPv4         |
+| =AF_INET6= | IPv6         |
+| =AF_LOCAL= | Unix 域协议  |
+| =AF_ROUTE= | 路由器套接字 |
+| =AF_KEY=   | 密钥套接字   |
+
+| type             | 说明           |
+| =SOCK_STRAM=     | 字节流套接字   |
+| =SOCK_DGRAM=     | 数据报套接字   |
+| =SOCK_SEQPACKET= | 有序分组套接字 |
+| =SOCK_RAW=       | 原始套接字     |
+
+| protocol       | 说明 |
+| =IPPROTO_TCP=  | TCP  |
+| =IPPROTO_UDP=  | UDP  |
+| =IPPROTO_SCTP= | SCTP |
+
+** =bind=
+#+BEGIN_SRC C
+#include <sys/types.h>
+#include <sys/socket.h>
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+#+END_SRC
+=socket= 创建成功后，内核分配给进程一个描述符用于标识socket，此时并未指定任何具体的地址。
+=bind= 的作用就是为 socket 指定一个地址。
+
+example:
+#+BEGIN_SRC C
+short port = 8090;
+struct sockaddr_in server_addr;
+
+server_addr.sin_family = AF_INET;
+server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+server_addr.sin_port = htons(port);
+
+if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+  err_quit("bind error");
+}
+#+END_SRC
+
+** =listen=
+#+BEGIN_SRC C
+#include <sys/socket.h>
+int listen(int sockfd, int backlog);
+#+END_SRC
+socket 被命名之后需要将其放入监听队列，以接受 client 连接。
+listen 的第一个参数就是 =socket= 返回的文件描述符，第二个参数是处于连接状态队列的上限[fn:4]。
+
+** =accept=
+#+BEGIN_SRC C
+#include <sys/socket.h>
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+#+END_SRC
+
+=addr= 参数用于返回 client 的地址信息。 =addrlen= 返回地址长度。
+
+example:
+#+BEGIN_SRC C
+struct sockaddr_in client_addr;
+socklen_t clilen = sizeof(client_addr);
+bzero(&client_addr, sizeof(client_addr));
+
+int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &clilen);
+#+END_SRC
+
+** =connect=
+
+#+BEGIN_SRC C
+#include <sys/socket.h>
+int connect(int sockfd, const struct sockaddr *servaddr, socklen_t addrlen);
+#+END_SRC
+sockfd 是 socket 函数返回的套接字描述符, 二三参数分别是 一个指向套接字地址结构的 指针和该结构的大小.
+
+** =close=
+#+BEGIN_SRC C
+#include <unistd.h>
+int close(int fd);
+#+END_SRC
+
+关闭 socket 和普通的关闭文件是一样的。
+
+** I/O
+对 socket 的读写和普通文件一样，都可以用 =read= 和 =write= ，但是 socket 也有专
+用的 IO 函数。
+
+#+BEGIN_SRC C
+#include <sys/types.h>
+#include <sys/socket.h>
+ssize_t recv(int sockfd, void *buf, size_t len, int flags);
+ssize_t send(int sockfd, const void *buf, size_t len, int flags);
+#+END_SRC
+
+=recv= 读取 socket 中的数据， buf 和 len 指定缓冲区及其大小。 flags 含义如下表所示：
+
+|-----------------+------------------------------------------+------+------|
+| flags           | description                              | send | recv |
+|-----------------+------------------------------------------+------+------|
+| =MSG_CONFIRM=   | 指示数据链路层持续监听对方回应，直到答复 | Y    | N    |
+| =MSG_DONTROUTE= | 不查看路由表                             | Y    | N    |
+| =MSG_DONTWAIT=  | 此次对 socket 的操作是非阻塞的           | Y    | Y    |
+| =MSG_MORE=      | 告知内核还有数据要发送                   | Y    | N    |
+| =MSG_WAITALL=   | 读取到指定长度的数据再返回               | N    | Y    |
+| =MSG_PEEK=      | 提前读取缓冲区内的数据                   | N    | Y    |
+| =MSG_OOB=       | 发送或接收紧急数据                       | Y    | Y    |
+| =MSG_NOSIGNAL=  | 向关闭的 socket 写入不引发 SIGPIPE       | Y    | N    |
+|-----------------+------------------------------------------+------+------|
+
+* 进程控制
+** =getpid= =getppit=
+
+#+begin_src C
+#include<unistd.h> // 定义在 unistd.h 头文件中
+pid_t getpid(void); // 返回调用进程的进程id
+pid_t getppid(void); // 返回调用进程的父进程id
+#+end_src
+
+父进程在下一节介绍。
+
+example:
+
+#+begin_src C
+#include<unistd.h>
+#include<stdio.h>
+int main() {
+  printf("current process ID: %d\n", getpid());
+}
+#+end_src
+
+** =fork=
+
+#+begin_src C
+#include<unistd.h>
+pid_t fork(void);
+#+end_src
+
+=fork= 函数的作用是创建一个新进程。新进程是当前进程的子进程。
+=fork= 调用一次，返回两次。对于父进程来说， =fork= 的返回值是子进程的进程id。
+对于新创建的子进程来说， =fork= 返回 0。
+
+子进程复制了父进程的所有的数据段，栈帧和堆。
+
+example1:
+#+begin_src C
+#include <unistd.h>
+#include <stdio.h>
+int main() {
+  pid_t pid;
+  if ((pid = fork()) == 0) {
+    printf("hello from the child process\n");
+  } else if (pid > 0) {
+    printf("hello from the parent process\n");
+  } else {
+    fprintf(stderr, "fork error\n");
+    exit(1);
+  }
+}
+#+end_src
+
+example2:
+#+begin_src C
+#include <unistd.h>
+#include <stdio.h>
+#include <wait.h>
+int global_value = 1;
+
+int main() {
+  int local_value = 2;
+  pid_t pid;
+
+  if ((pid = fork()) == 0) {
+    global_value++;
+    local_value++;
+  } else if (pid > 0) {
+    waitpid(-1, NULL, 0); // 等待子进程结束
+    printf("global_value: %d\n", global_value);
+    printf("local_value: %d\n", local_value);
+  } else {
+    fprintf(stderr, "fork error\n");
+    exit(1);
+  }
+}
+#+end_src
+
+example3:
+#+begin_src C
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <wait.h>
+#include <fcntl.h>
+
+int main() {
+  char str1[] = "write a string to file";
+  char str2[] = "write another string to file";
+  pid_t pid;
+  file* test = open("test", o_rdwr | o_creat);
+  if ((pid = fork()) == 0) {
+    write(test, str1, sizeof(str1) - 1);
+  } else if (pid > 0) {
+    write(test, str2, sizeof(str2) - 1);
+  } else {
+    fprintf(stderr, "fork error\n");
+    exit(1);
+  }
+  return 0;
+}
+#+end_src
+
+=fork= 之后父进程和子进程的文件描述符同样是共享的。如果不采用任何同步措施，其结果是未定的。
+
+** =exit=
+=exit= 函数一般分两种： =exit(3)= 属于 =ANSI C= 的一部分。而 =_exit(2)= 则是一个系统调用。
+
+两者的区别在于： =exit= 调用 =_exit= 。 =exit= 函数不处理包括文件描述符在内的系统资源的控制。
+
+** =signal=
+信号是一种软中断，分为可靠信号和不可靠信号。通常由内核或者其他进程发起。常用于进程间通信。
+
+#+begin_src C
+#include <signal.h>
+typedef void(*sighandler_t)(int);
+sighandler_t signal(int signum, sighandler_t handler);
+int kill(pid_t pid, int sig);
+#+end_src
+
+程序使用 =signal= 注册信号处理函数。即当相应信号发生时，调用此函数进行处理。
+其中 =SIGKILL= =SIGSTOP= 默认不可忽略，处理和阻塞。
+
+=kill= 可以向另一个进程发送信号。
+
+example[fn:5]:
+#+begin_src C
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+void handle_alrm() {
+  printf("handle SIGALRM\n");
+  // kill(getpid(), SIGKILL);
+}
+
+int main() {
+  signal(SIGALRM, handle_alrm);
+  while (1)
+    ;
+}
+#+end_src
+
+shell 中编译运行次代码，新建 shell 执行 =ps -a | grep "a.out"= 获取id。
+=kill -ALRM id= 即可看到结果。
+
+** =wait= 与 =waitpid=
+无论一个进程正常还是异常退出。内核都会向其父进程发送 =SIGCHILD= 信号。父进程如不进行处理，则默认忽略 =SIGCHILD= 信号。
+此时会子进程会变成 [[https://baike.baidu.com/item/%E5%83%B5%E5%B0%B8%E8%BF%9B%E7%A8%8B][僵尸进程]] 。
+
+#+begin_src C
+#include <sys/wait.h>
+pid_t wait(int *statloc);
+pid_t waitpid(pid_t pid, int *statloc, int options);
+#+end_src
+
+当父进程调用 =wait/waitpid= 时，父进程将阻塞，直到有子进程退出，内核发送 =SIGCHILD= 信号。
+
+=waitpid= 第三个参数可设置非阻塞选项。
+
+两者的主要区别：
+- wait 等待任意子进程。waitpid 可以指定等待特定子进程（当pid == -1时，等待任意子进程）
+- 由于 =Unix= 的信号是不排队的，所以如果有多个同时发生的 =SIGCHILD= 事件。wait 只会处理1个或多个信号。正确做法是在 SIGCHILD 的handler 中使用非阻塞waitpid[fn:6] 。
+
+example:
+
+#+begin_src C
+int main() {
+  pid_t id;
+  int state;
+  if ((id = fork()) == 0) {
+    sleep(1);
+    printf("process id:%d\nid:%d\n", getpid(), id);
+  }
+  waitpid(id, &state, 0);
+  printf("process id:%d\nid:%d\n", getpid(), id);
+}
+#+end_src
+
+* 进程通信
+
+上节的 =signal= 与 =kill= 是典型的进程间通信，但是这种方式一般是内核和进程间的通信。现在介绍其他通信方式。
+
+** =pipe=
+
+内核抽象出一个管道的概念用于两个相关连的进程之间的通信，一般认为这个通信是半双工的。
+虽然现在大多数符合 =POSIX= 标准的系统都支持全双工的管道通信。但是出于可移植性考虑仍然使用半双工对待pipe。
+
+声明如下：
+#+begin_src C
+#include <unistd.h>
+int pipe(int fd[2]);
+#+end_src
+
+从声明中可以看出，pipe 接受一个数组作为返回值。 =fd[0]= 可读， =fd[1]= 可写。
+
+单个进程的管道没有意义，一般用于fork 后父进程与子进程的通信。
+
+example:
+#+begin_src C
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main() {
+  int n, fd[2];
+  pid_t id;
+  char line[4096];
+
+  if (pipe(fd) < 0) {
+    fprintf(stderr, "pipe error");
+    exit(1);
+  }
+
+  if ((id = fork()) < 0) {
+    fprintf(stderr, "fork error");
+    exit(1);
+  } else if (id > 0) { // parent
+    close(fd[0]);
+    write(fd[1], "hello\n", 6);
+  } else { // child
+    close(fd[1]);
+    n = read(fd[0], line, 4096);
+    write(STDOUT_FILENO, line, n);
+    printf("child process %d exit\n", getpid());
+  }
+}
+#+end_src
+
+上述例子中，子进程向父进程发送一个字符串。可以看到在子进程中 =close(fd[0])= ，因为其不需要读取数据。
+父进程 =close(fd[1])= 同理（关闭的原因是 fork 后共享文件描述符）。
+
+如果进程两端都需要读写那需要两个 fd[2] 数组用于通信。
+
+** =FIFO=
+
+FIFO 也称作 /具名管道/ ，pipe 只能用于两个相关的进程间通信。对于不相关的进程，使用 =FIFO= 通信。
+
+#+begin_src C
+#include <sys/stat.h>
+int mkfifo(const char *path, mode_t mode);
+int mkfifoat(int fd, const char *path, mode_t mode);
+#+end_src
+
+=mkfifo= 的做法类似于 [[https://pubs.opengroup.org/onlinepubs/9699919799/functions/creat.html][creat]] 。
+其在文件系统中存在确定的文件。
+
+FIFO 有以下两种用途：
+- shell 命令使用FIFO 将数据从一条管道传输到另一条管道时，不需要创建临时文件。
+- C/S 结构中，FIFO 作为节点在client 和 server 之间传递数据。
+
+example:
+#+begin_src C
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+const char* FIFO_path = "a_test_FIFO";
+
+int main() {
+  char buffer[80];
+  pid_t pid;
+  int fd;
+  char s[] = "hello fifo";
+
+  remove(FIFO_path);
+  mkfifo(FIFO_path, 0666);
+
+  if ((pid = fork()) < 0) {
+    fprintf(stderr, "fork error\n");
+    exit(1);
+  } else if (pid == 0) {
+    fd = open(FIFO_path, O_RDONLY);
+    int len = read(fd, buffer, 80);
+    printf("buffer length: %d, %s\n", len, buffer);
+    close(fd);
+  } else {
+    sleep(10);
+    fd = open(FIFO_path, O_WRONLY);
+    write(fd, s, sizeof(s));
+    close(fd);
+    waitpid(-1, NULL, 0);
+    remove(FIFO_path);
+  }
+  return 0;
+}
+#+end_src
+
+* 守护进程
+守护进程是一种生命周期很长的进程，其在系统启动时启动，在系统关闭时终止。
+
+守护进程的创建应符合如下规则：
+1. 设置掩码（unmask)；
+2. 调用 =fork= ，然后父进程 =exit= ；
+3. 调用 =setsid= 创建新会话；
+4. 更改工作目录为根目录；
+5. 关闭不需要的文件描述符；
+6. 关联stdin, stdout, stderr 到 /dev/null；
+
+example:
+#+begin_src C
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <syslog.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+
+#define MAXLINE 4096
+
+int daemon_pro;
+void err_doit(int errnoflag, int level, const char* format, va_list ap) {
+  int errno_bak = errnoflag;
+  char buf[MAXLINE + 1];
+  int buf_len = strlen(buf);
+
+  vsnprintf(buf, MAXLINE, format, ap);
+
+  if (errnoflag) {
+    snprintf(buf + buf_len, MAXLINE - buf_len, ": %s", strerror(errno_bak));
+  }
+
+  strcat(buf, "\n");
+
+  if (daemon_pro) {
+    syslog(level, "%s", buf);
+  } else {
+    fflush(stdout);
+    fputs(buf, stderr);
+    fflush(stderr);
+  }
+}
+void err_quit(const char* format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  err_doit(1, LOG_ERR, format, ap);
+  va_end(ap);
+  exit(1);
+}
+
+void daemonize(const char* cmd) {
+  int i, fd0, fd1, fd2;
+  pid_t pid;
+  struct rlimit rl;
+  struct sigaction sa;
+  /*
+   * Clear file creation mask.
+   */
+  umask(0);
+  /*
+   * Get maximum number of file descriptors.
+   */
+  if (getrlimit(RLIMIT_NOFILE, &rl) < 0)
+    /*
+     * Become a session leader to lose controlling TTY.
+     */
+    err_quit("%s: can’t get file limit", cmd);
+  if ((pid = fork()) < 0)
+    err_quit("%s: can’t fork", cmd);
+  else if (pid != 0) /* parent */
+    exit(0);
+  setsid();
+  /*
+   * Ensure future opens won’t allocate controlling TTYs.
+   */
+  sa.sa_handler = SIG_IGN;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  if (sigaction(SIGHUP, &sa, NULL) < 0)
+    err_quit("%s: can’t ignore SIGHUP", cmd);
+  if ((pid = fork()) < 0)
+    err_quit("%s: can’t fork", cmd);
+  else if (pid != 0) /* parent */
+    exit(0);
+  /*
+   * Change the current working directory to the root so
+   * we won’t prevent file systems from being unmounted.
+   */
+  if (chdir("/") < 0)
+    err_quit("%s: can’t change directory to /", cmd);
+  /*
+   * Close all open file descriptors.
+   */
+  if (rl.rlim_max == RLIM_INFINITY)
+    rl.rlim_max = 1024;
+  for (i = 0; i < rl.rlim_max; i++)
+    close(i);
+  /*
+   * Attach file descriptors 0, 1, and 2 to /dev/null.
+   */
+  fd0 = open("/dev/null", O_RDWR);
+  fd1 = dup(0);
+  fd2 = dup(0);
+  /*
+   * Initialize the log file.
+   */
+  openlog(cmd, LOG_CONS, LOG_DAEMON);
+  if (fd0 != 0 || fd1 != 1 || fd2 != 2) {
+    syslog(LOG_ERR, "unexpected file descriptors %d %d %d", fd0, fd1, fd2);
+    exit(1);
+  }
+}
+#+end_src
+
+* Footnotes
+[fn:6] 具体细节参考 [[https://book.douban.com/subject/4859464/][UNIX网络编程 卷1：套接字联网API（第3版）]]5.10节。
+
+[fn:5] 此处在signal handler 中使用了 =printf= 函数，实际应用中不应使用带缓冲的IO 函数。参考：[[http://http://man7.org/linux/man-pages/man7/signal-safety.7.html#DESCRIPTION][signal-safety]]。
+更多细节可以参考 [[https://stackoverflow.com/a/5423108][What is the difference between using _exit() & exit() in a conventional Linux fork-exec?]]
+
+[fn:4] Linux 2.2 之前， =backlog= 的值是 =SYN_RCVD= 和 =ESTABLISHED= socket 的和，
+2.2 之后是 =ESTABLISHED= 的数量。更多内容可以参考：[[https://blog.csdn.net/m0_37581001/article/details/95202691][高并发下的backlog]]。
+
+[fn:3] Linux 2.6.17 起，type 参数接受 =SOCK_NONBLOCK= 和 =SOCK_CLOEXEC= 分别用于
+设置非阻塞 socket 和 fork 后在子进程关闭 socket 。
+
+[fn:2] 例如 Linux 2.6 关于 =I/O 多路复用= (I/O multiplexing) 加入了 =epoll=
+函数，现在广泛用于高性能服务器当中。
+
+[fn:1] 实际上本文忽略了一个基础但是十分重要的内容： =I/O= 函数及相关模型，这部分
+内容在网络编程时起到了非常重要的作用，在此不扩展讨论，具体内容可以参考 =APUE= 第
+3,11,12章，以及 =UNP= 第6章。
