@@ -2,14 +2,14 @@
 #+AUTHOR: zhscn
 #+HTML_HEAD: <link rel="stylesheet" type="text/css" href="orgstyle.css"/>
 
-在大佬的指点下成功在 Windows 上编译了 native-comp ，记录一下踩过得坑。
+在大佬的指点下成功在 Windows 上编译了 native-comp ，记录一下踩过的坑。
 主要参考： [[https://www.albertzhou.net/blog/2020/01/emacs-native-comp.html][在windows上用mingw64编译emacs的feature/native-comp分支]]
 
 * 编译 =libgccjit=
 首先获取最新的 gcc 代码：
 #+begin_src bash
 git clone --depth=1 https://mirrors.tuna.tsinghua.edu.cn/git/gcc.git
-tar cvf gcc.tar gcc # 保留一份原始代码方便后续的 pull
+tar cvf gcc.tar gcc # 保留一份原始代码
 #+end_src
 
 只需要编译 =jit= 的支持就好了，原始的 =configure= 选项有一些不太适用，可能是大佬编译的完整 gcc 。
@@ -18,6 +18,8 @@ tar cvf gcc.tar gcc # 保留一份原始代码方便后续的 pull
 - libbacktrace
 - libdecnumber (可能缺少某个头文件，在 gcc 根目录搜索一下复制到当前目录就行了)
 - libiberty
+** 具体过程
+
 
 ** 代码修改
 #+begin_example
