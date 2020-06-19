@@ -1,3 +1,4 @@
+原文链接： https://kernel.dk/io_uring.pdf
 * 使用 =io_uring= 的高效 IO
 
 本文旨在介绍最新的 Linux IO 接口： =io_uring= ，并与现有的（异步IO）实现进行比较。
