@@ -381,78 +381,80 @@ io_uring 支持的大多数命令都直接处理数据，例如直接执行读/�
 你可以在一个超时命令中同时指定两个触发事件。如果超时与两者同时排队，则触发的第一个条件将生成超时完成事件。
 发布超时完成事件时，无论完成请求的数量是否已满足，所有完成服务的等待者都将被唤醒。
 
-** 内存序
-通过实例进行安全有效通信的一个重要方面是正确使用内存排序原语。详细介绍各种体系结构的内存顺序不在本文的讨论范围之内。
-如果你对使用 liburing 的简化 io_uring API 感到满意，那么可以放心地忽略此部分，而直接跳到库部分。
-如果你对使用原始接口感兴趣，那么了解这一部分很重要。为了简化操作，我们将其简化为两个简单的内存排序操作。
-为了简化起见，在某种程度上简化了解释。
+** 内存排序
+通过 io_uring 实例进行安全有效通信的一个重要方面是正确使用内存排序原语。详细介绍各种体系结构的内存顺序不在本文的讨论范围之内。
+如果你使用由 liburing 简化的 io_uring API 感到满意，那么可以放心地忽略此部分，直接跳到 liburing library 部分。
+如果你对使用原始接口感兴趣，那么了解这一部分很重要。
 
-=read_barrier()=: 在进行后续的内存读取之前，请确保先前的写入是可见的。
+为了简单起见，我们将其精简为两个简单的内存排序操作。
+这个操作在某种程度上简化了解释。
 
-=write_barrier()=: 在先前的写入之后对此写入进行排序。
+=read_barrier()=: 确保在此之前的写入对于后续的内存读取是可见的。
+
+=write_barrier()=: 确保之前的写入完成之后再进行之后的写入。
 
 根据所讨论的体系结构，这两者之一或两者可能都是无操作的。在使用 io_uring 时不需要考虑这一点。
 重要的是我们在某些体系结构上将需要它们，因此应用程序编写者应了解如何做到这一点。
 需要 =write_barrier()= 来确保写入的顺序。
 假设某个应用程序想要填充一个 sqe 并通知内核一个可供使用的空间。
-这是一个分为两个阶段的过程：首先填充各种 sqe 成员，然后将 sqe 索引放置在 SQ 环形数组中，然后更新 SQ 环形尾部以向内核显示新条目可用。
-在不暗示任何顺序的情况下，处理器以其认为最佳的任何顺序重新排列这些写入是完全合法的。
+这是一个分为两个阶段的过程：首先填充 sqe 成员，然后将 sqe 索引放置在 SQ 环的索引(间接)数组中，然后更新 SQ ring 的 tail 告知内核有新提交可用。
+在不指定任何顺序的情况下，处理器选择一个最佳的执行顺序进行重新排列这些写入是完全合法的。
 让我们看下面的示例，每个数字表示一个内存操作：
 
 #+BEGIN_SRC C
-  /*1*/ sqe->opcode = IORING_OP_READV;
-  /*2*/ sqe->fd = fd;
-  /*3*/ sqe->off =0;
-  /*4*/ sqe->addr =&iovec;
-  /*5*/ sqe->len =1;
-  /*6*/ sqe->user_data = some_value;
-  /*7*/ sqring->tail = sqring->tail + 1;
+/*1*/ sqe->opcode    = IORING_OP_READV;
+/*2*/ sqe->fd        = fd;
+/*3*/ sqe->off       = 0;
+/*4*/ sqe->addr      = &iovec;
+/*5*/ sqe->len       = 1;
+/*6*/ sqe->user_data = some_value;
+/*7*/ sqring->tail   = sqring->tail + 1;
 #+END_SRC
 
-无法保证写入 7（使 sqe 对内核可见）将作为这些顺序中的最后一次写入。
-至关重要的是，写入 7 之前的所有写入都必须在写入 7 之前可见，否则内核可能会看到一半的写入 sqe 。
+无法保证使 sqe 对内核可见的写入 7 作为这些写入顺序中的最后一次写入。
+至关重要的是，写入 7 之前的所有写入都必须在写入 7 之前可见，否则内核可能会看到写入一半的 sqe 。
 从应用程序的角度来看，在将新的 sqe 通知内核之前，你将需要一个 =write_barrier= 来确保写入的正确顺序。
-由于实际的 sqe 存储顺序无关紧要，只要它们在尾写之前可见，我们就可以在写 6 之后和写 7 前使用排序原语来排序，因此该序列如下所示：
+由于实际的 sqe 存储顺序无关紧要，只要它们在 tail 写之前可见，我们就可以在写 6 之后和写 7 前使用排序原语来排序，因此该序列如下所示：
 
 #+BEGIN_SRC C
-  /*1*/ sqe->opcode = IORING_OP_READV;
-  /*2*/ sqe->fd = fd;
-  /*3*/ sqe->off =0;
-  /*4*/ sqe->addr =&iovec;
-  /*5*/ sqe->len =1;
-  /*6*/ sqe->user_data = some_value;
-        write_barrier();  /* ensure previous writes are seen before tail write */
-  /*7*/ sqring->tail = sqring->tail +1;
-        write_barrier();  /* ensure tail write is seen */
+/*1*/ sqe->opcode    = IORING_OP_READV;
+/*2*/ sqe->fd        = fd;
+/*3*/ sqe->off       = 0;
+/*4*/ sqe->addr      = &iovec;
+/*5*/ sqe->len       = 1;
+/*6*/ sqe->user_data = some_value;
+      write_barrier();  /* ensure previous writes are seen before tail write */
+/*7*/ sqring->tail   = sqring->tail + 1;
+      write_barrier();  /* ensure tail write is seen */
 #+END_SRC
 
-在读取 SQ 环尾部之前，内核将调用 =read_barrier()= ，以确保从应用程序写入的尾部可见。
-从 CQ 环方面来看，由于消费者/生产者角色是相反的，因此应用程序只需要在读取 CQ 环尾部之前发出 =read_barrier()= 即可确保它可以看到内核进行的任何写操作。
+在读取 SQ 环 tail 之前，内核将调用 =read_barrier()= ，以确保从应用程序写入的 tail 可见。
+从 CQ 环方面来看，由于消费者/生产者角色是相反的，因此应用程序只需要在读取 CQ 环 tail 之前调用 =read_barrier()= 即可确保它可以看到内核进行的任何写操作。
 
 虽然内存排序类型已经压缩为两种特定类型，但是架构实现当然会有所不同，具体取决于正在运行代码的计算机。即使应用程序直接使用 io_uring 的接口（而不是 liburing helpers），它仍然需要特定于体系结构的屏障类型。
 liburing 库提供了这些定义，建议使用应用程序中的那些定义。
 
-有了有关内存顺序的基本说明，并且有了 liburing 提供的用于管理它们的辅助函数，请返回并阅读前面引用 =read_barrier()= 和 =write_barrier()= 的示例。如果以前没有完全说通的话，希望他们现在就做。
+有了有关内存顺序的基本说明，和 liburing 提供的用于管理它们的辅助函数，请返回并阅读前面引用 =read_barrier()= 和 =write_barrier()= 的示例。如果以前没有完全理解的话，希望现在能重新阅读一遍。
 
 ** liburing library
-有了 io_uring 的内部细节，现在你将放心地了解到有一种更简单的方法可以完成上述操作。liburing 库有两个目的：
+了解了 io_uring 的内部细节后，现在你将放心地学习一种更简单的完成上述操作的方法。liburing 库有两个目的：
 
 - 消除了用于设置 io_uring 实例的样板代码。
 - 为基本用例提供简化的 API 。
 
-后者确保应用程序根本不必担心内存屏障，也不必自己进行任何环形缓冲区管理。
-这使该 API 更加易于使用和理解，并且实际上消除了理解其工作原理的所有细节的需要。
-如果我们只是专注于提供基于 liburing 的示例，那么这篇文章可能会短得多，但是通常至少有益于至少了解内部工作原理，以便从应用程序中获得最大的性能。
+后者确保应用程序根本不必担心内存屏障，也不必自己管理任何环形缓冲区。
+这使该 API 更加易于使用和理解，并且实际上不再需要理解工作原理中所有细节。
+如果我们只是专注于提供基于 liburing 的示例，那么这篇文章可能会短得多，但是了解内部工作原理是有好处的，可以从应用程序中获得最大的性能。
 另外，liburing 目前的重点是减少样板代码，并为标准用例提供基本的辅助函数。
-通过 liburing ，某些更高级的功能尚不可用。但是，这并不意味着你不能将两者混在一起。它们在包装层下面都在相同的结构上工作。
+某些更高级的功能尚不可通过 liburing 实现。但是，这并不意味着你不能将两者混合使用。它们在封装层下面使用的都是相同结构。
 通常鼓励应用程序使用 liburing 定义的辅助函数，即使它们正在使用的是原始接口。
 
 *** LIBURING IO_URING SETUP
 让我们从一个例子开始。不去手动调用 =io_uring_setup(2)= 并随后对三个必要区域执行 =mmap(2)= ，而是使用 liburing 提供的辅助函数来完成同样的任务：
 
 #+BEGIN_SRC C
-  struct io_uring ring;
-  io_uring_queue_init(ENTRIES,&ring,0);
+struct io_uring ring;
+io_uring_queue_init(ENTRIES,&ring,0);
 #+END_SRC
 
 io_uring 结构同时包含 SQ 和 CQ 环的信息，并且 =io_uring_queue_init(3)= 调用为你处理所有设置逻辑。
@@ -463,41 +465,46 @@ io_uring 结构同时包含 SQ 和 CQ 环的信息，并且 =io_uring_queue_init
 #+END_SRC
 
 来销毁它。
-与应用程序分配的其他资源类似，一旦应用程序退出，内核将自动获取它们。对于应用程序可能已创建的任何 io_uring 实例也是如此。
+与应用程序分配的其他资源类似，一旦应用程序退出，内核将自动回收它们。对于应用程序可能已创建的任何 io_uring 实例也是如此。
 
 *** LIBURING SUBMISSION AND COMPLETION
 一个非常基本的用例是提交请求，然后等待它完成。使用 liburing 的辅助函数，看起来像这样：
 
 #+BEGIN_SRC C
-  struct io_uring_sqe sqe;
-  struct io_uring_cqe cqe;
-  /*get an sqe and fill in a READV operation */
-  sqe = io_uring_get_sqe(&ring);
-  io_uring_prep_readv(sqe, fd,&iovec,1, offset);
-  /*tell the kernel we have an sqe ready for consumption */
-  io_uring_submit(&ring);
-  /*wait for the sqe to complete */
-  io_uring_wait_cqe(&ring,&cqe);
-  /* read and process cqe event */
-  app_handle_cqe(cqe);
-  io_uring_cqe_seen(&ring,cqe);
+struct io_uring_sqe sqe;
+struct io_uring_cqe cqe;
+
+/*get an sqe and fill in a READV operation */
+sqe = io_uring_get_sqe(&ring);
+
+io_uring_prep_readv(sqe, fd, &iovec, 1, offset);
+
+/*tell the kernel we have an sqe ready for consumption */
+io_uring_submit(&ring);
+
+/*wait for the sqe to complete */
+io_uring_wait_cqe(&ring, &cqe);
+
+/* read and process cqe event */
+app_handle_cqe(cqe);
+io_uring_cqe_seen(&ring, cqe);
 #+END_SRC
 
-这看起来是自解释。前提是没有其他提交事件，最后一次调用 =io_uring_wait_cqe(3)= 将返回我们刚刚提交的完成事件。如果你这样做，则完成事件可能是另一个提交事件。
+这看起来是自解释。如果没有其他提交事件，最后一次调用 =io_uring_wait_cqe(3)= 将返回我们刚刚提交的完成事件。如果你这样做，则完成事件可能是另一个提交事件。
 
 如果应用程序仅希望查看完成情况而不希望等待事件变为可用，则 =io_uring_peek_cqe(3)= 会执行此操作。
 对于这两种用例，应用程序必须在完成此完成事件后立即调用 =io_uring_cqe_seen(3)= 。
 重复调用 =io_uring_peek_cqe(3)= 或 =io_uring_wait_cqe(3)= 将会继续返回相同的事件。
 为了避免内核在应用程序完成之前可能覆盖现有完成事件，必须进行拆分。
-=io_uring_cqe_seen(3)= 递增 CQ 环形头，这使内核可以在同一插槽中填充新事件。
+=io_uring_cqe_seen(3)= 递增 CQ 环的 head ，这使内核可以在同一插槽中填充新事件。
 
 可以使用各种辅助函数来填充 sqe ， =io_uring_prep_readv(3)= 只是一个示例。我鼓励应用程序始终尽可能地利用 liburing 提供的辅助函数的优势。
 
 liburing 库仍处于起步阶段，并且正在不断开发以扩展受支持的功能和可用的辅助函数。
 
 ** 高级用例和特性
-上面的示例和用例适用于各种类型的 IO ，例如基于 =O_DIRECT= 的文件 IO ，缓冲的 IO ，套接字 IO 等。
-无需特别注意以确保它们的正确操作或异步性质。但是，io_uring 确实提供了应用程序需要选择的许多功能。
+上面的示例和用例适用于各种类型的 IO ，例如基于 =O_DIRECT= 的文件 IO ，带缓冲的 IO ，套接字 IO 等。
+无需特别注意以确保它们的正确操作或异步性质。但是，io_uring 确实提供了应用程序可以选择的许多功能。
 以下小节将描述其中的大多数情况。
 
 *** FIXED FILES AND BUFFERS
@@ -507,104 +514,104 @@ liburing 库仍处于起步阶段，并且正在不断开发以扩展受支持�
 这是通过第三个系统调用完成的：
 
 #+BEGIN_SRC C
-  int io_uring_register(unsigned int fd, unsigned int opcode, void *arg,
-                        unsigned int nr_args);
+int io_uring_register(unsigned int fd, unsigned int opcode, void *arg,
+                      unsigned int nr_args);
 #+END_SRC
 
-=fd= 是 io_uring 实例环文件描述符，而 =opcode= 则是指正在完成的注册类型。要注册文件集，必须使用 =IORING_REGISTER_FILES= 。
+=fd= 是 io_uring 实例的文件描述符，而 =opcode= 则是指要进行的注册类型。要注册文件集，必须使用 =IORING_REGISTER_FILES= 。
 然后 =arg= 必须指向该应用程序已经打开的文件描述符数组，并且 =nr_args= 必须包含该数组的大小。
 =io_uring_register(2)= 成功完成文件集注册后，应用程序可以通过将数组中文件描述符的索引
-（而不是实际文件描述符）分配给 sqe->fd 字段并将其标记为文件来使用这些文件通过在 sqe->flags 字段中设置 =IOSQE_FIXED_FILE= 来设置 fd 。
-通过将 sqe->fd 设置为未注册的 fd 而不在标志中设置 =IOSQE_FIXED_FILE= ，即使已注册文件集，应用程序也可以继续使用未注册的文件。
+（而不是实际文件描述符）赋值给 sqe->fd 字段，将其标记为文件集描述符来使用这些文件通过在 sqe->flags 字段中设置 =IOSQE_FIXED_FILE= 。
+即使已注册文件集，应用程序也可以继续使用未注册的文件，通过将 sqe->fd 设置为未注册的 fd ，不在 flags 中设置 =IOSQE_FIXED_FILE= 。
 当 io_uring 实例被销毁时，已注册的文件集将自动释放，或者可以通过使用 =io_uring_register(2)= 的 =opcode= 中的 =IORING_UNREGISTER_FILES= 来手动完成。
 
 也可以注册一组固定的 IO 缓冲区。使用 =O_DIRECT= 时，内核必须先将应用程序页面映射到内核，然后才能对它们进行 IO ，然后在完成 IO 之后取消映射这些页面。
 这可能是代价昂贵的操作。如果应用程序重用 IO 缓冲区，则可以执行一次映射和取消映射，而不是每个 IO 操作一次。
-要为 IO 注册一组固定的缓冲区，必须使用 opcode 设置 =IORING_REGISTER_BUFFERS= 调用 =io_uring_register(2)= 。
-然后， =args= 必须包含一个 struct iovec 数组，并使用每个 iovec 的地址和长度对其进行填充。
+要为 IO 注册一组固定的缓冲区，调用 =io_uring_register(2)= 时必须将 opcode 设置为 =IORING_REGISTER_BUFFERS= 。
+然后， =args= 必须包含一个 struct iovec 数组，并使用每个 iovec 的地址和长度对 args 进行填充。
 =nr_args= 必须包含 iovec 数组的大小。成功注册缓冲区后，应用程序可以使用 =IORING_OP_READ_FIXED= 和 =IORING_OP_WRITE_FIXED= 在这些缓冲区之间执行 IO 。
-使用这些固定的操作码时，ske->addr 必须包含这些缓冲区之一内的地址，而 sqe->len 必须包含请求的长度（以字节为单位）。
+使用固定的 IO 缓冲区时，ske->addr 必须包含这些缓冲区之一内的地址，而 sqe->len 必须包含请求的长度（以字节为单位）。
 应用程序可能会注册比任何给定 IO 操作大的缓冲区，将固定的读/写仅作为单个固定缓冲区的子集是完全合法的。
 
 *** POLLED IO
 对于追求最低延迟的应用程序，io_uring 提供了对轮询的文件 IO 的支持。
-在这种情况下，轮询是指在不依赖硬件中断来发出完成事件的情况下执行 IO 。
-轮询 IO 后，应用程序将反复向硬件驱动程序询问提交的 IO 请求的状态。
+在这种情况下，轮询是指不依赖硬件中断来发出完成事件的情况下执行 IO 。
+轮询 IO 时，应用程序将反复向硬件驱动程序询问提交的 IO 请求的状态。
 这与非轮询 IO 不同，后者通常是应用程序进入睡眠状态，等待硬件中断作为其唤醒源。
 对于低延迟的设备，轮询可以显着提高性能。对于非常高的 IOPS 应用程序也是如此，因为高中断率使非轮询负载具有更高的开销。
-无论是在等待时间还是总体 IOPS 速率方面，轮询时有意义的边界数都取决于应用程序，IO 设备和计算机的功能。
+无论是在等待时间还是总体 IOPS 速率方面，轮询有意义时的边界数值都取决于应用程序，IO 设备和计算机的功能。
 
-要利用IO轮询，必须在传递给 =io_uring_setup(2)= 系统调用或 liburing 的辅助函数 =io_uring_queue_init(3)= 标志中设置 =IORING_SETUP_IOPOLL= 。
-使用轮询时，应用程序将无法再检查 CQ 环尾是否有完成功能，因为不会有自动触发的异步硬件完成事件。
+要利用IO轮询，必须在传递给 =io_uring_setup(2)= 系统调用或 liburing 的辅助函数 =io_uring_queue_init(3)= 的 flags 中设置 =IORING_SETUP_IOPOLL= 。
+使用轮询时，应用程序将无法再检查 CQ 环尾确定是否有完成事件，因为不会有自动触发的异步硬件完成事件。
 相反，应用程序必须通过调用 =io_uring_enter(2)= 并设置 =IORING_ENTER_GETEVENTS= 并将 =min_complete= 设置为所需的事件数来主动查找并获得这些事件。
-将 =IORING_ENTER_GETEVENTS= 设置为 0 ，并将 =min_complete= 设置为 0 是合法的。对于轮询的 IO ，这要求内核仅检查驱动程序端的完成事件，而不是不断循环这样做。
+设置 =IORING_ENTER_GETEVENTS= ，并将 =min_complete= 设置为 0 是合法的。对于轮询的 IO ，这要求内核仅检查驱动程序端的完成事件，而不是不断循环检查。
 
-仅在对 =IORING_SETUP_IOPOLL= 注册的 io_uring 实例上可以使用对轮询完成有意义的操作码。
+仅在以 =IORING_SETUP_IOPOLL= 注册的 io_uring 实例上可以使用对轮询完成有意义的操作。
 这些包括任何读/写命令： =IORING_OP_READV= ， =IORING_OP_WRITEV= ， =IORING_OP_READ_FIXED= ， =IORING_OP_WRITE_FIXED= 。
-在注册用于轮询的 io_uring 实例上发布不可轮询的操作码是非法的。
+在注册用于轮询的 io_uring 实例上发布不可轮询的操作是非法的。
 这样做将导致 =io_uring_enter(2)= 返回 =-EINVAL= 。
 其背后的原因是内核无法知道对设置了 =IORING_ENTER_GETEVENTS= 的 =io_uring_enter(2)= 的调用是否可以安全地等待事件的睡眠，或者是否应该主动轮询事件。
 
 *** KERNEL SIDE POLLING
-尽管 io_uring 通常在通过更少的系统调用来发出和完成更多请求方面更为有效，但在某些情况下，我们可以通过进一步减少执行 IO 所需的系统调用数量来提高效率。
-这样的功能之一就是内核端轮询。启用该功能后，应用程序不再需要调用 =io_uring_enter(2)= 来提交 IO 。
+尽管 io_uring 通常在通过更少的系统调用来发出和完成更多请求方面更加高效，但在某些情况下，我们可以通过进一步减少执行 IO 所需的系统调用数量来提高效率。
+这样的功能就是内核端轮询。启用该功能后，应用程序不再需要调用 =io_uring_enter(2)= 来提交 IO 。
 当应用程序更新 SQ 环并填写新的 sqe 时，内核端将自动注意到新的条目并提交。这是通过特定于 io_uring 的内核线程完成的。
 
-要使用此功能，必须使用特定于 =io_uring_params= 的 =flags= 成员的 =IORING_SETUP_SQPOLL= 注册 io_uring 实例，或将其传递给 =io_uring_queue_init(3)= 。
+要使用此功能，必须将 =io_uring_params= 的 =flags= 成员设置为 =IORING_SETUP_SQPOLL= 来注册 io_uring 实例，或将其传递给 =io_uring_queue_init(3)= 。
 此外，如果应用程序希望将此线程限制为特定的 CPU ，则也可以通过标记 =IORING_SETUP_SQ_AFF= ，并将 io_uring_params 的 =sq_thread_cpu= 设置为所需的 CPU 来完成。
-请注意，使用 =IORING_SETUP_SQPOLL= 设置 io_uring 实例是一项特权操作。如果用户没有足够的特权， =io_uring_queue_init(3)= 将失败，并显示 =-EPERM= 。
+注意，使用 =IORING_SETUP_SQPOLL= 设置 io_uring 实例是一项特权操作。如果用户没有足够的特权， =io_uring_queue_init(3)= 将失败，并显示 =-EPERM= 。
 
 为了避免在 io_uring 实例处于非活动状态时浪费过多的 CPU ，内核侧线程在空闲一段时间后会自动进入睡眠状态。
-发生这种情况时，线程将在 SQring =flags= 成员中设置 =IORING_SQ_NEED_WAKEUP= 。
+发生这种情况时，线程将在 SQ ring 的 =flags= 成员中设置 =IORING_SQ_NEED_WAKEUP= 。
 设置该值后，应用程序将无法依赖内核自动查找新条目，然后必须设置 =IORING_ENTER_SQ_WAKEUP= 来调用 =io_uring_enter(2)= 。
 应用程序端逻辑通常看起来像这样：
 
 #+BEGIN_SRC C
-  /* fills in new sqe entries */
-  add_more_io();
-  /*
-   * need to call io_uring_enter() to make the kernel notice the new IO
-   * if polled and the thread is now sleeping.
-   */
-  if((*sqring->flags)& IORING_SQ_NEED_WAKEUP)
-      io_uring_enter(ring_fd, to_submit, to_wait, IORING_ENTER_SQ_WAKEUP);
+/* fills in new sqe entries */
+add_more_io();
+/*
+ * need to call io_uring_enter() to make the kernel notice the new IO
+ * if polled and the thread is now sleeping.
+ */
+if((*sqring->flags) & IORING_SQ_NEED_WAKEUP)
+    io_uring_enter(ring_fd, to_submit, to_wait, IORING_ENTER_SQ_WAKEUP);
 #+END_SRC
 
-只要应用程序继续驱动 IO ，就永远不会设置 =IORING_SQ_NEED_WAKEUP= ，并且我们可以有效地执行 IO ，而无需执行单个系统调用。
-但是，重要的是在应用程序中始终保持与上面类似的逻辑，以防线程确实进入睡眠状态。可以通过设置 io_uring_params =sq_thread_idle= 成员来配置空闲前的特定宽限期。
+只要应用程序持续驱动 IO ，就永远不会设置 =IORING_SQ_NEED_WAKEUP= ，并且我们可以有效地执行 IO ，而无需执行单个系统调用。
+但是，重要的是在应用程序中始终保持与上面类似的逻辑，以防线程确实进入睡眠状态。可以通过设置 io_uring_params 的 =sq_thread_idle= 成员来配置空闲前的特定等待期。
 该值以毫秒为单位。如果未设置此成员，则内核默认将空闲时间设为一秒钟，然后将线程置于睡眠状态。
 
-对于 "正常" IRQ 驱动的 IO ，可以通过直接在应用程序中查看 CQ 环来找到完成事件。
-如果使用 =IORING_SETUP_IOPOLL= 设置了 io_uring 实例，则内核线程还将负责完成收获。
-因此，对于这两种情况，除非应用程序希望等待 IO 发生，否则它只能查看 CQ 环以查找完成事件。
+对于 "正常" IRQ 驱动的 IO ，应用程序可以直接查看 CQ 环来找到完成事件。
+如果使用 =IORING_SETUP_IOPOLL= 设置了 io_uring 实例，则内核线程还将负责完成收获完成事件。
+因此，对于这两种情况，除非应用程序希望等待 IO 发生，它都能通过查看 CQ 环查找完成事件。
 
 ** 性能
-最终，io_uring 达到了为其设定的设计目标。我们在内核和应用程序之间有一个非常有效的传递机制，以两个不同的环的形式存在。
+最终，io_uring 达到了初始的设计目标。我们在内核和应用程序之间有一个非常有效的传递机制，以两个不同的环的形式存在。
 尽管原始接口在应用程序中需要谨慎使用，但主要的复杂之处实际上是需要显式的内存排序原语。
 那些在发布和处理事件的提交和完成方面都只保留了一些细节，并且在整个应用程序中通常遵循相同的模式。
-随着释放接口的不断成熟，我希望大多数应用程序使用那里提供的 API 都会感到满意。
+随着 liburing 接口的不断成熟，我希望大多数应用程序使用 liburing 提供的 API 时都会感到满意。
 
-尽管本说明的目的不是要详细介绍 io_uring 的已实现性能和可伸缩性，但是本节将简要介绍该领域中的一些成功经验。
-有关更多详细信息，请参见[1]。请注意，由于在具体的实现方面有进一步的改进，这些结果有些过时了。
-例如，在我的测试箱上，io_uring 的峰值每核性能现在约为 1700K 4k IOPS ，而不是 1620K 。
-请注意，这些值没有太多绝对含义，它们在衡量相对改进方面非常有用。
+尽管本说明的目的不是要详细介绍 io_uring 的已实现的性能和可伸缩性，但是本节将简要介绍该领域中的一些成功经验。
+有关更多详细信息，请参见 [1] 。请注意，由于在具体的实现方面有进一步的改进，这些结果有些过时了。
+例如，在我的测试机器上，io_uring 的峰值每核性能现在约为 1700K 4k IOPS ，而不是 1620K 。
+请注意，这些值没有太多绝对含义，它们在衡量相对改进方面更加有用。
 既然应用程序和内核之间的通信机制不再是瓶颈，我们将继续使用 io_uring 查找更低的延迟和更高的峰值性能。
 
 *** 原始性能
 有很多方法可以查看接口的原始性能。大多数测试也将涉及内核的其他部分。一个这样的例子就是上面部分中的数字，我们通过随机读取块设备或文件来评估性能。
-为了获得最佳性能，io_uring 帮助我们通过轮询达到 170 万个 4k IOPS 。aio 的性能要比 608K 低得多。这里的比较并不公平，因为 aio 不支持 polled IO 。
-如果禁用轮询，则 io_uring 可以为（否则）相同的测试用例驱动约 1.2M IOPS 。那时候 aio 的局限性很明显，对于相同的工作负载，io_uring 驱动的 IOPS 数量是原来的两倍。
+为了获得最佳性能，io_uring 帮助我们通过轮询达到 170M 4k IOPS 。aio 608K 的性能要低得多。这里的比较并不公平，因为 aio 不支持 polled IO 。
+如果禁用轮询，则 io_uring 可以在相同的测试用例驱动约 1.2M IOPS 。此时 aio 的局限性很明显，对于相同的工作负载，io_uring 驱动的 IOPS 数是 aio 的两倍。
 
 io_uring 也支持 no-op 命令，主要用于检查接口的原始吞吐量。
-使用时，观察到从每秒 12M 消息（我的笔记本电脑）到每秒 20M 消息（用于其他引用结果的测试框）之间的任何位置。
+根据所使用的系统，可以观察到从每秒 12M 消息（我的笔记本电脑）到每秒 20M 消息（用于其他引用结果的测试机器）之间的任何值。
 实际结果根据特定的测试用例而有很大的不同，并且主要受必须执行的系统调用的数量限制。
 原始接口是受内存限制的，并且提交和完成消息很小且在内存中呈线性状态，因此每秒获得的消息速率可能非常高。
 
-*** 缓冲的异步性
-我之前提到内核内缓冲的 aio 实现可能比在用户空间中完成一项。主要原因与缓存数据与未缓存数据有关。
+*** BUFFERED ASYNC PERFORMANCE
+我之前提到在内核内缓冲的 aio 实现比在用户空间中更高效。主要原因与缓存数据与未缓存数据有关。
 在进行缓冲 IO 时，应用程序通常严重依赖于内核页面缓存来获得良好的性能。
-用户空间应用程序无法知道是否要缓存下一步要查询的数据。
-它可以查询此信息，但是这需要更多的系统调用，并且答案本质上总是很简单：从现在开始到现在几秒钟内缓存的内容不多。
+用户空间应用程序无法知道下一步要查询的数据是否已经被缓存。
+它可以查询此信息，但是这需要更多的系统调用，并且答案本质上总是很简单：what is cached this very instant might not be so a few milliseconds from now. (+这块实在翻译不出来, 大意是经过系统调用后取得结果不是实时的, 有可能在内核与用户态切换时, 相关数据被移出缓存+)
 因此，具有 IO 线程池的应用程序始终必须将请求退回至异步上下文，从而导致至少两个上下文切换。如果请求的数据已经在页面缓存中，则会导致性能急剧下降。
 
 io_uring 会处理这种情况，就像处理其他可能阻塞应用程序的资源一样。
@@ -613,19 +620,19 @@ io_uring 会处理这种情况，就像处理其他可能阻塞应用程序的�
 IO 提交调用返回后，应用程序将在 CQ 环中已经有一个完成事件等待着它，并且数据已经被复制。
 
 ** Further reading
-由于这是一个全新的接口，我们没有太多采用。在撰写本文时，具有该接口的内核处于 -rc 阶段。
-即使对接口进行了相当完整的描述，使用程序学习程序也可能有利于完全理解如何最好地使用它。
+由于这是一个全新的接口，我们没有大规模的采用。在撰写本文时，具有该接口的内核处于 -rc 阶段。
+在对接口进行了相当完整的描述后，使用 io_uring 学习程序有利于完全理解如何最好地使用它。
 
-一个示例是 fio[2] 附带的 io_uring 引擎。除注册文件集外，它还可以使用所有上述高级功能。
+一个示例是 fio [2] 附带的 io_uring 引擎。除注册文件集外，它可以使用所有上述高级功能。
 
 另一个示例是 fio 附带的 t/io_uring.c 示例基准测试应用程序。
 它只是使用可配置的设置对文件或设备进行随机读取，以探索高级用例的整个功能集。
 
-liburing 库[3]具有用于系统调用接口的全套手册页，值得一读。
+liburing 库 [3] 具有用于系统调用接口的全套手册页，值得一读。
 它还附带了一些测试程序，包括对开发过程中发现的问题的单元测试以及技术演示。
 
 LWN 还撰写了一篇有关 io_uring 早期阶段的出色文章[4]。
-请注意，在写完本文后，对 io_uring 进行了一些更改，因此，对于两者之间存在差异的情况，建议你参考本文。
+请注意，在写完这篇文章后，对 io_uring 进行了一些更改，因此，对于两者之间存在差异的情况，建议你参考本文。
 
 ** References
 [1] https://lore.kernel.org/linux-block/20190116175003.17880-1-axboe@kernel.dk/
