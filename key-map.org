@@ -26,6 +26,12 @@ xcape -e 'Control_L=Escape'
 
 至于使用display manager的。。不用就好了
 
+另一种方式：
+#+begin_src bash
+setxkbmap -option ctrl:nocaps
+xcape -e 'Control_L=Escape' -t 200
+#+end_src
+
 * Windows
 
 win下的映射属实麻烦。
