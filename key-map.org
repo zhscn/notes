@@ -54,7 +54,7 @@ Windows Registry Editor Version 5.00
   00,00,00,00
 #+end_example
 
-注册表无法统一 =Ctrl= 和 =Esc= 。~~辣鸡M$~~
+注册表无法统一 =Ctrl= 和 =Esc= 。 ~~辣鸡M$~~
 
 ** AutoHotKey
 
