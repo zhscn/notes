@@ -63,7 +63,7 @@ Windows Registry Editor Version 5.00
 忘了从哪抄的了。
 #+begin_example
 ; Author: fwompner gmail com
-*InstallKeybdHook
+#InstallKeybdHook
 SetCapsLockState, alwaysoff
 Capslock::
 Send {LControl Down}
@@ -83,6 +83,6 @@ $LControl::CapsLock
 
 * Mac
 
-=Karabiner-Elements = 、 =Hammerspoon= 和 =Keyboard Maestro =
+=Karabiner-Elements= =Hammerspoon= 和 =Keyboard Maestro=
 
 +有钱了再试试+
